@@ -72,7 +72,7 @@ function feedLinks(html, base) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') || '';
     const allowed = ALLOWED_ORIGINS.includes(origin) || (env.ALLOWED_ORIGIN && origin === env.ALLOWED_ORIGIN);
     const headers = {
@@ -100,6 +100,13 @@ export default {
     let target;
     try { target = new URL(new URL(request.url).searchParams.get('url') || ''); } catch { return reply(400, 'Add ?url=<feed address>.'); }
 
+    // Feeds already fetched in the last 10 minutes (only real feeds are kept,
+    // never an error page or a "you look like a bot" page).
+    const cacheKey = new Request('https://feed-cache.invalid/' + encodeURIComponent(target.href));
+    const cache = globalThis.caches?.default; // Cloudflare's cache (absent when testing locally)
+    const cached = cache && await cache.match(cacheKey);
+    if (cached) return reply(200, await cached.text(), { 'Content-Type': 'application/xml; charset=utf-8', 'X-Relay-Kind': 'feed' });
+
     // Follow redirects one at a time, checking every address on the way.
     let res;
     for (let hop = 0; ; hop++) {
@@ -107,8 +114,7 @@ export default {
       try {
         res = await fetch(target, {
           redirect: 'manual',
-          // Shared 10-minute cache for everyone reading this feed.
-          cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
+          cf: { cacheTtl: 0 },
           headers: {
             // Only a generic agent: nothing about the person reading is passed on.
             'User-Agent': 'SalaReader/1.0 (+https://reader.sala.company)',
@@ -132,6 +138,11 @@ export default {
     const text = decodeFeed(buf, res.headers.get('Content-Type') || '');
 
     if (isFeed(text)) {
+      // Shared 10-minute cache for everyone reading this feed.
+      if (cache) {
+        const put = cache.put(cacheKey, new Response(text, { headers: { 'Cache-Control': `max-age=${CACHE_SECONDS}` } }));
+        if (ctx?.waitUntil) ctx.waitUntil(put); else await put;
+      }
       return reply(200, text, { 'Content-Type': 'application/xml; charset=utf-8', 'X-Relay-Kind': 'feed' });
     }
     if (isHtml(text)) {

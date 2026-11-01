@@ -626,7 +626,8 @@ async function fetchFeedTextRetry(url, opts) {
   const text = await fetchFeedText(url, opts);
   if (parseFeedXML(text, url, 'x') || !/bing\.com\/news/.test(url)) return text;
   await sleep(2500);
-  const again = await fetchFeedText(url, opts);
+  // A different address skips anything the relay kept from the bad answer.
+  const again = await fetchFeedText(`${url}&_=${Date.now() % 100000}`, opts);
   if (parseFeedXML(again, url, 'x')) return again;
   throw new Error("The news search didn't answer with results just now. It will be tried again.");
 }
