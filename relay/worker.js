@@ -17,7 +17,8 @@
 // Setup: see "Your own relay" in the README.
 
 const ALLOWED_ORIGINS = [
-  'https://salareader.sala.company',
+  'https://reader.sala.company',
+  'https://salareader.sala.company', // the earlier address
   'http://localhost:8000',
 ];
 const MAX_BYTES = 5_000_000;
@@ -92,7 +93,7 @@ export default {
         cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
         headers: {
           // Only a generic agent: nothing about the person reading is passed on.
-          'User-Agent': 'SalaReader/1.0 (+https://salareader.sala.company)',
+          'User-Agent': 'SalaReader/1.0 (+https://reader.sala.company)',
           Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.5',
         },
       });

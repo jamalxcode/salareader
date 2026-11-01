@@ -2,7 +2,7 @@
 
 The old Google Reader, with the AI search Feedly has. It's a fast RSS reader with folders, unread counts and `j`/`k` keys, plus AI search that finds articles by meaning. It runs on GitHub Pages with no server and no account, and **everything about you stays on your device**.
 
-**Open it:** https://salareader.sala.company/
+**Open it:** https://reader.sala.company/
 
 ## What it does
 

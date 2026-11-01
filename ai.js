@@ -98,7 +98,7 @@ async function openaiClient(p, apiKey) {
   const mod = await loadOpenAI();
   const OpenAI = mod.default || mod.OpenAI;
   const defaultHeaders = p.id === 'openrouter'
-    ? { 'HTTP-Referer': 'https://salareader.sala.company', 'X-Title': 'Sala Reader' } // OpenRouter's app attribution
+    ? { 'HTTP-Referer': 'https://reader.sala.company', 'X-Title': 'Sala Reader' } // OpenRouter's app attribution
     : undefined;
   return { OpenAI, client: new OpenAI({ apiKey, baseURL: p.base, dangerouslyAllowBrowser: true, defaultHeaders }) };
 }

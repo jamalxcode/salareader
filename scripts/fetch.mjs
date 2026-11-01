@@ -128,7 +128,7 @@ async function fetchText(url) {
       signal: ctrl.signal,
       redirect: 'follow',
       headers: {
-        'user-agent': 'SalaReader/1.0 (+https://salareader.sala.company)',
+        'user-agent': 'SalaReader/1.0 (+https://reader.sala.company)',
         accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5',
       },
     });
