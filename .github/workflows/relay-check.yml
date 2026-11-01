@@ -1,0 +1,40 @@
+name: Check the relay
+
+# Run by hand (Actions → Check the relay → Run workflow) to test the live
+# shared relay: it should return feeds, only feed links for web pages,
+# and refuse everything else.
+on:
+  workflow_dispatch:
+    inputs:
+      relay:
+        description: Relay address
+        default: https://salareader-relay.jamal-akuna-matata.workers.dev
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check
+        env:
+          RELAY: ${{ inputs.relay }}
+        run: |
+          fail=0
+          check() { # name, expected status, curl args...
+            name=$1; want=$2; shift 2
+            got=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 30 "$@")
+            if [ "$got" = "$want" ]; then mark=PASS; else mark=FAIL; fail=1; fi
+            printf '%-4s %-38s got %s, want %s: %s\n' "$mark" "$name" "$got" "$want" "$(head -c 100 /tmp/body | tr '\n' ' ')"
+          }
+          O='Origin: https://reader.sala.company'
+          check "feed (xkcd)"                     200 -H "$O" "$RELAY/?url=https://xkcd.com/atom.xml"
+          check "web page gives feed links only"  200 -H "$O" "$RELAY/?url=https://simonwillison.net/"
+          check "non-feed is refused"             415 -H "$O" "$RELAY/?url=https://api.github.com/"
+          check "private address is refused"      400 -H "$O" "$RELAY/?url=http://127.0.0.1/"
+          check "redirect to a feed is followed"  200 -H "$O" "$RELAY/?url=http://xkcd.com/atom.xml"
+          check "other websites are refused"      403 -H "Origin: https://example.com" "$RELAY/?url=https://xkcd.com/atom.xml"
+          check "no origin is refused"            403 "$RELAY/?url=https://xkcd.com/atom.xml"
+          check "old address still allowed"       200 -H "Origin: https://salareader.sala.company" "$RELAY/?url=https://xkcd.com/atom.xml"
+          curl -s -D - -o /dev/null -H "$O" "$RELAY/?url=https://simonwillison.net/" | grep -i '^x-relay-kind' || { echo "FAIL missing X-Relay-Kind header (old relay code?)"; fail=1; }
+          exit $fail
