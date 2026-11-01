@@ -857,6 +857,14 @@ function emptyHTML() {
   return `<div class="empty"><p>Nothing here yet.</p></div>`;
 }
 
+/** Each person's reader lives in their browser on their device. */
+function deviceNoteHTML(card) {
+  const text = `Your reader lives in this browser on this device. Your phone and laptop each have their own, and clearing this browser's data erases it. To move it or keep it safe, use <b>⚙ Settings → Export backup</b>, then <b>Import backup</b> on the other device.`;
+  return card
+    ? `<div class="device-note" role="note"><span class="device-ico" aria-hidden="true">📱💻</span><p>${text}</p><div class="device-actions"><button data-act="backup" class="primary">Export backup</button><button data-act="dismissnote" class="ghost">Got it</button></div></div>`
+    : `<p class="device-foot">📱 ${text} <button class="linkish" data-act="backup">Export backup</button></p>`;
+}
+
 function greeting() {
   const h = new Date().getHours();
   return h < 5 ? 'Up late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
@@ -873,6 +881,7 @@ function renderHome() {
   const feedsWithUnread = new Set(unread.map((i) => i.f)).size;
   list.innerHTML = `
     <section class="home">
+      ${store.get('deviceNoteDismissed', false) ? '' : deviceNoteHTML(true)}
       <div class="hero">
         <h1>${greeting()} 👋</h1>
         <p>${unread.length ? `You have <b>${unread.length}</b> unread article${unread.length === 1 ? '' : 's'} from <b>${feedsWithUnread}</b> feed${feedsWithUnread === 1 ? '' : 's'}.` : S.items.length ? '<b>Inbox zero.</b> You read everything. 🎉' : 'Your reader is warming up.'}
@@ -893,6 +902,7 @@ function renderHome() {
       <p class="hint">Follow a subject across every feed. The AI matches articles by meaning, not just keywords.</p>
       <div class="chips">${S.topics.map((t) => `<a class="chip" href="#/topic/${t.id}">✨ ${esc(t.name)}${S.vectorsState !== 'loading' ? ` <b>${unreadOf(topicMatches(t).items)}</b>` : ''}</a>`).join('')}<button class="chip add" data-act="newtopic">＋ New topic</button></div>
       ${broken.length ? `<h2 class="home-h">Needs attention</h2><ul class="broken">${broken.map((f) => `<li><a href="#/feed/${f.id}">${esc(f.title)}</a>: ${esc(f.error)}</li>`).join('')}</ul>` : ''}
+      ${store.get('deviceNoteDismissed', false) ? deviceNoteHTML(false) : ''}
     </section>`;
 }
 
@@ -1310,6 +1320,8 @@ function wire() {
         case 'surprise': surprise(); closeSidebar(); return;
         case 'refresh': refresh(); return;
         case 'switchai': openSettings(); return;
+        case 'backup': openSettings(); $('#exportBackup').scrollIntoView({ block: 'center' }); $('#exportBackup').focus(); return;
+        case 'dismissnote': store.set('deviceNoteDismissed', true); render(); return;
         case 'newtopic': openTopic(); return;
         case 'more': renderList(false); return;
         case 'savetopic': openTopic(S.view.q); return;

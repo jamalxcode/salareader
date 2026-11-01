@@ -22,6 +22,8 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 
 ## Privacy
 
+**Your reader lives in that browser on that device.** Your phone and laptop each have their own, and clearing the browser's data erases it. To move it or keep it safe, use ⚙ Settings → **Export backup**, then **Import backup** on the other device. The home page says this too.
+
 Sala Reader has no accounts and stores nothing about you on a server. Your subscriptions, folders, read and starred articles, AI topics, settings and API keys are kept only on your device, in the browser's IndexedDB storage. Starred articles are kept even after they leave the feed. *Erase all data on this device* in Settings deletes it all.
 
 Here is everything that leaves the device:
