@@ -30,7 +30,7 @@ jobs:
           O='Origin: https://reader.sala.company'
           check "feed (xkcd)"                     200 -H "$O" "$RELAY/?url=https://xkcd.com/atom.xml"
           check "web page gives feed links only"  200 -H "$O" "$RELAY/?url=https://simonwillison.net/"
-          check "non-feed is refused"             415 -H "$O" "$RELAY/?url=https://api.github.com/"
+          check "non-feed is refused"             415 -H "$O" "$RELAY/?url=https://raw.githubusercontent.com/jamalxcode/salareader/main/feeds.json"
           check "private address is refused"      400 -H "$O" "$RELAY/?url=http://127.0.0.1/"
           check "redirect to a feed is followed"  200 -H "$O" "$RELAY/?url=http://xkcd.com/atom.xml"
           check "other websites are refused"      403 -H "Origin: https://example.com" "$RELAY/?url=https://xkcd.com/atom.xml"
