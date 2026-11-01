@@ -320,12 +320,32 @@ async function loadIndex(bust) {
 
 const catalogByUrl = () => new Map(S.index.feeds.map((f) => [f.url, f]));
 
-/** One subscription per feed address (a feed added twice showed every article twice). */
+/** The folders a feed is in (like Google Reader and Feedly, a feed can be in several). */
+function feedFolders(f) {
+  const list = [...new Set([f.folder || '', ...(f.folders || [])])];
+  return list.length > 1 ? list.filter(Boolean) : list;
+}
+/** Adds folders to a subscription; true if anything changed. */
+function addFolders(sub, names) {
+  const have = new Set(feedFolders(sub));
+  const add = names.filter((n) => n && !have.has(n));
+  if (!add.length) return false;
+  if (!sub.folder) sub.folder = add.shift();
+  if (add.length) sub.folders = [...new Set([...(sub.folders || []), ...add])];
+  return true;
+}
+
+/** One subscription per feed address (a feed added twice showed every article twice); its folders are kept. */
 function dedupeSubs() {
   if (!S.subs) return false;
-  const seen = new Set();
+  const byUrl = new Map();
   const before = S.subs.length;
-  S.subs = S.subs.filter((s) => { if (seen.has(s.url)) return false; seen.add(s.url); return true; });
+  S.subs = S.subs.filter((s) => {
+    const kept = byUrl.get(s.url);
+    if (!kept) { byUrl.set(s.url, s); return true; }
+    addFolders(kept, feedFolders(s));
+    return false;
+  });
   return S.subs.length !== before;
 }
 
@@ -335,7 +355,7 @@ function rebuild() {
   S.feeds = (S.subs || S.pendingOwn || []).map((s) => {
     const c = catalog.get(s.url);
     // Catalog feeds come from the shared data; the rest is fetched by this page.
-    if (c) return { ...c, title: s.title || c.title, folder: s.folder ?? c.folder };
+    if (c) return { ...c, title: s.title || c.title, folder: s.folder ?? c.folder, folders: s.folders };
     // Your own feed, fetched by this page. A catalog feed whose data didn't load
     // stays a catalog feed (no articles until it does), never an "own" one.
     return s.own ? s : { ...s, catalogMissing: true };
@@ -569,6 +589,9 @@ function parseFeedXML(xml, feedUrl, feedId) {
       const v = c.getAttribute('type') === 'xhtml' ? c.innerHTML.trim() : c.textContent.trim();
       if (v) return v;
     }
+    // YouTube and podcasts: <media:group><media:description>, plain text.
+    const md = [...el.getElementsByTagName('*')].find((x) => x.localName === 'description' && x.namespaceURI?.includes('mrss'));
+    if (md?.textContent.trim()) return md.textContent.trim().split(/\n{2,}/).map((para) => `<p>${esc(para).replace(/\n/g, '<br>')}</p>`).join('');
     return '';
   };
   const entries = atom ? [...root.children].filter((c) => c.localName === 'entry') : [...doc.getElementsByTagName('item')];
@@ -608,6 +631,24 @@ function discoverFeed(html, pageUrl) {
   const link = doc.querySelector('link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]');
   if (!link) return '';
   try { return new URL(link.getAttribute('href'), pageUrl).href; } catch { return ''; }
+}
+
+/**
+ * The address to fetch for a feed. Feedly saved YouTube channels as web
+ * pages (youtube.com/playlist?list=UU…); YouTube has a real feed for each.
+ */
+function fetchAddress(url) {
+  try {
+    const u = new URL(url);
+    if (!/(^|\.)youtube\.com$/.test(u.hostname) || u.pathname.startsWith('/feeds/')) return url;
+    const list = u.searchParams.get('list');
+    if (u.pathname === '/playlist' && list) return `https://www.youtube.com/feeds/videos.xml?playlist_id=${encodeURIComponent(list)}`;
+    const ch = /^\/channel\/(UC[\w-]+)/.exec(u.pathname);
+    if (ch) return `https://www.youtube.com/feeds/videos.xml?channel_id=${ch[1]}`;
+    const user = /^\/user\/([\w.-]+)/.exec(u.pathname);
+    if (user) return `https://www.youtube.com/feeds/videos.xml?user=${user[1]}`;
+  } catch { /* not a URL */ }
+  return url;
 }
 
 /** The search words of a Google News search feed (old Google Reader-era or current address), else ''. */
@@ -702,7 +743,7 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   const q = googleNewsQuery(feed.url);
   if (xml == null) {
     try {
-      xml = await fetchFeedTextRetry(feed.url, { feed });
+      xml = await fetchFeedTextRetry(fetchAddress(feed.url), { feed });
     } catch (e) {
       // Google blocks relays: a Google News search comes from Bing News instead.
       if (!q) throw e;
@@ -741,6 +782,7 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   target.site = parsed.site || target.site;
   if (!target.titleSet && parsed.title) target.title = parsed.title;
   target.ok = Date.now();
+  target.every = fetchInterval(S.ownItems[target.id]);
   target.error = '';
   delete target.failSince;
   if (via) target.via = via; else delete target.via;
@@ -777,6 +819,32 @@ function offerNew() {
 }
 
 const OWN_REFRESH_MS = 25 * 60 * 1000;
+
+/**
+ * When a feed is next fetched. Busy feeds every 30 minutes, quiet ones up to
+ * twice a day, long-silent ones daily; failing feeds back off (1 h, 6 h,
+ * then daily). With hundreds of feeds this keeps the shared relay within its
+ * daily allowance.
+ */
+function nextFetchAt(s) {
+  if (s.error) {
+    const failing = Date.now() - (s.failSince || Date.now());
+    const wait = failing < 6 * 3600e3 ? 3600e3 : failing < 3 * 864e5 ? 6 * 3600e3 : 864e5;
+    return (s.lastTry || 0) + wait;
+  }
+  if (!s.ok) return 0;
+  return s.ok + (s.every || OWN_REFRESH_MS);
+}
+
+/** How often to fetch a feed, from how often it has been posting. */
+function fetchInterval(items) {
+  const dates = items.filter((i) => i.dated !== false).map((i) => i.d).sort((a, b) => b - a).slice(0, 8);
+  if (dates.length < 2) return 2 * 3600e3;
+  if (Date.now() - dates[0] > 30 * 864e5) return 864e5;
+  const gaps = dates.slice(1).map((d, k) => dates[k] - d).sort((a, b) => a - b);
+  const typical = gaps[Math.floor(gaps.length / 2)];
+  return Math.min(12 * 3600e3, Math.max(30 * 60e3, typical / 2));
+}
 let ownRefreshing = null;
 let stopRefresh = false;
 
@@ -793,10 +861,7 @@ function refreshOwnFeeds({ force = false, wait = false } = {}) {
     const now = Date.now();
     const due = (S.subs || []).filter((s) => {
       if (!s.own || catalog.has(s.url)) return false;
-      if (force) return true;
-      // Failing for over 3 days: try once a day (saves the relay's daily allowance).
-      if (s.error && s.failSince && now - s.failSince > 3 * 864e5) return now - (s.lastTry || 0) > 864e5;
-      return s.error || !s.ok || now - s.ok > OWN_REFRESH_MS;
+      return force || now >= nextFetchAt(s);
     });
     if (!due.length || stopRefresh) return;
     S.ownProgress = { done: 0, total: due.length };
@@ -1054,7 +1119,7 @@ function viewItems() {
     case 'starred': items = Object.values(S.starred).sort((a, b) => b.starredAt - a.starredAt); break;
     case 'feed': items = S.items.filter((i) => i.f === v.id); break;
     case 'folder': {
-      const ids = new Set(S.feeds.filter((f) => (f.folder || '') === v.id).map((f) => f.id));
+      const ids = new Set(S.feeds.filter((f) => feedFolders(f).includes(v.id)).map((f) => f.id));
       items = S.items.filter((i) => ids.has(i.f));
       break;
     }
@@ -1164,9 +1229,10 @@ function renderSidebar() {
   const nav = $('#sidebar');
   const folders = new Map();
   for (const f of S.feeds) {
-    const k = f.folder || '';
-    if (!folders.has(k)) folders.set(k, []);
-    folders.get(k).push(f);
+    for (const k of feedFolders(f)) {
+      if (!folders.has(k)) folders.set(k, []);
+      folders.get(k).push(f);
+    }
   }
   const unreadByFeed = new Map();
   for (const it of S.items) if (!isRead(it.id)) unreadByFeed.set(it.f, (unreadByFeed.get(it.f) || 0) + 1);
@@ -1702,7 +1768,7 @@ function download(name, text, type) {
 
 function exportOPML() {
   const folders = new Map();
-  for (const f of S.feeds) { const k = f.folder || ''; if (!folders.has(k)) folders.set(k, []); folders.get(k).push(f); }
+  for (const f of S.feeds) for (const k of feedFolders(f)) { if (!folders.has(k)) folders.set(k, []); folders.get(k).push(f); }
   const x = (s) => esc(s);
   const line = (f) => `      <outline type="rss" text="${x(f.title)}" title="${x(f.title)}" xmlUrl="${x(f.url)}"${f.site ? ` htmlUrl="${x(f.site)}"` : ''}/>`;
   const body = [...folders].map(([name, list]) => (name ? `    <outline text="${x(name)}" title="${x(name)}">\n${list.map(line).join('\n')}\n    </outline>` : list.map(line).join('\n').replace(/^ {2}/gm, ''))).join('\n');
@@ -1767,22 +1833,33 @@ async function importOPML(file) {
     const parent = o.parentElement?.closest('outline:not([xmlUrl])');
     found.push({ url: o.getAttribute('xmlUrl'), title: o.getAttribute('title') || o.getAttribute('text') || host(o.getAttribute('xmlUrl')), folder: parent?.getAttribute('title') || parent?.getAttribute('text') || '' });
   }
-  // Skip feeds you already have, odd addresses, and repeats (OPML files often list a feed in two folders).
-  const have = new Set(S.feeds.map((f) => f.url));
-  const fresh = found.filter((f) => {
-    if (!safeUrl(f.url) || have.has(f.url)) return false;
-    have.add(f.url);
-    return true;
-  });
+  // One entry per address with all its folders (Feedly lists a feed once per folder it's in).
+  const byUrl = new Map();
+  for (const f of found) {
+    if (!safeUrl(f.url)) continue;
+    const g = byUrl.get(f.url);
+    if (g) { if (!g.folders.includes(f.folder)) g.folders.push(f.folder); } else byUrl.set(f.url, { ...f, folders: [f.folder] });
+  }
   const catalog = catalogByUrl();
   S.subs ??= [];
-  for (const f of fresh) {
+  const fresh = [];
+  let foldersAdded = 0;
+  for (const f of byUrl.values()) {
+    const existing = S.subs.find((s) => s.url === f.url);
+    // A feed you already have joins any folders it's in in the file.
+    if (existing) { if (addFolders(existing, f.folders)) foldersAdded++; continue; }
     const c = catalog.get(f.url);
-    S.subs.push(c ? { id: c.id, url: c.url, title: c.title, folder: f.folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder: f.folder, own: true, site: '' });
+    const [folder, ...more] = f.folders;
+    const sub = c ? { id: c.id, url: c.url, title: c.title, folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder, own: true, site: '' };
+    if (more.length) sub.folders = more.filter(Boolean);
+    S.subs.push(sub);
+    fresh.push(f);
   }
   saveSubs();
+  if (foldersAdded) toast(`${foldersAdded} feed${foldersAdded === 1 ? '' : 's'} you already had joined more folders.`, 4000);
   const mins = Math.ceil(fresh.filter((f) => !catalog.has(f.url)).length / 55);
-  toast(`Imported ${fresh.length} feed${fresh.length === 1 ? '' : 's'}${found.length > fresh.length ? ` (${found.length - fresh.length} you already had)` : ''}. Fetching them${mins > 1 ? `, about ${mins} minutes` : ''}; articles appear as they arrive.`, 6000);
+  const already = byUrl.size - fresh.length;
+  toast(`Imported ${fresh.length} feed${fresh.length === 1 ? '' : 's'}${already ? ` (${already} you already had)` : ''}. Fetching them${mins > 1 ? `, about ${mins} minutes` : ''}; articles appear as they arrive.`, 6000);
   rebuild(); render();
   await refreshOwnFeeds({ wait: true });
   rebuild(); render();
@@ -2087,7 +2164,7 @@ function openAdd() {
   $('#addUrl').value = '';
   $('#addFolder').value = S.view.type === 'folder' ? S.view.id : '';
   $('#addStatus').textContent = '';
-  $('#folderList').innerHTML = [...new Set(S.feeds.map((f) => f.folder).filter(Boolean))].map((f) => `<option value="${esc(f)}">`).join('');
+  $('#folderList').innerHTML = [...new Set(S.feeds.flatMap(feedFolders).filter(Boolean))].map((f) => `<option value="${esc(f)}">`).join('');
   renderDiscover();
   $('#addDialog').showModal();
   closeSidebar();

@@ -19,7 +19,9 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
 - **News searches:** type words instead of an address in ＋ Subscribe (for example `tbilisi`) to follow a news search for them (Bing News RSS). Google Reader-era Google News search feeds in an OPML import keep working: Google blocks relays, so the same search comes from Bing News (also when Google answers with nothing), and the feed page shows its address and says where results come from. All Google News search formats are recognised: `?q=…` (Google Reader-era and current) and `/search/section/q/…`. Search words are passed as they are, so quotes ("exact phrase"), OR and -minus work the same.
 - **Broken feeds:** each one says why (gone, refuses automated readers, site down). **Try again** retries it; feeds failing for more than 3 days are retried once a day; Home offers to unsubscribe from feeds failing for over a week.
-- **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML.
+- **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML. A feed can be in several folders, as in Google Reader and Feedly: it shows in each, and its articles count once. Re-importing a file adds missing folders to feeds you already have.
+- **YouTube channels:** Feedly-style addresses (`youtube.com/playlist?list=UU…`, `/channel/UC…`, `/user/…`) are read through YouTube's RSS feed, with thumbnails and descriptions.
+- **Many feeds:** each of your own feeds is fetched as often as it posts (every 30 minutes for busy feeds, up to twice a day for quiet ones, daily for silent ones). Failing feeds back off: hourly, every 6 hours, then daily. This keeps even a 1,000-feed reader within the shared relay's allowance.
 - **Move devices:** ⚙ Settings → *Export backup* saves everything to one file. *Import backup* on the other device restores it. API keys are left out unless you tick the box.
 
 ## Privacy
