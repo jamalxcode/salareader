@@ -1,0 +1,81 @@
+name: Fetch feeds and deploy
+
+# cron-job.org starts this on a schedule through the GitHub API
+# (see "Updates with cron-job.org" in the README). It also runs on every
+# push to main, so editing feeds.json or the site updates it right away.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # to save feed data on the data branch
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Cache the AI model
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: model-all-MiniLM-L6-v2-q8
+
+      - name: Restore previous feed data
+        run: |
+          mkdir -p data
+          if git fetch --depth 1 origin data 2>/dev/null; then
+            git archive FETCH_HEAD | tar -x -C data
+            echo "Restored $(ls data/content 2>/dev/null | wc -l) feeds of previous data"
+          else
+            echo "No data branch yet, starting fresh"
+          fi
+
+      - name: Fetch feeds
+        run: node scripts/fetch.mjs
+        env:
+          MODEL_CACHE: ${{ github.workspace }}/.model-cache
+
+      - name: Save feed data to the data branch
+        run: |
+          cd data
+          git init -q -b data
+          git add -A
+          git -c user.name="salareader-bot" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "Feed data $(date -u +%Y-%m-%dT%H:%MZ)"
+          # One commit, force-pushed, so the repo doesn't grow with every update.
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+          rm -rf .git
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Assemble the site
+        run: |
+          mkdir _site
+          cp -r index.html style.css app.js ai.js icon.svg feeds.json CNAME .nojekyll data _site/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

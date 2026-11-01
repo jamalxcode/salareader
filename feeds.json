@@ -1,0 +1,39 @@
+{
+  "folders": [
+    {
+      "name": "Tech",
+      "feeds": [
+        { "title": "Hacker News", "url": "https://hnrss.org/frontpage" },
+        { "title": "The Verge", "url": "https://www.theverge.com/rss/index.xml" },
+        { "title": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index" }
+      ]
+    },
+    {
+      "name": "AI",
+      "feeds": [
+        { "title": "Simon Willison", "url": "https://simonwillison.net/atom/everything/" },
+        { "title": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml" }
+      ]
+    },
+    {
+      "name": "Science",
+      "feeds": [
+        { "title": "Quanta Magazine", "url": "https://www.quantamagazine.org/feed/" },
+        { "title": "NASA", "url": "https://www.nasa.gov/feed/" }
+      ]
+    },
+    {
+      "name": "World",
+      "feeds": [
+        { "title": "BBC World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml" }
+      ]
+    },
+    {
+      "name": "Fun",
+      "feeds": [
+        { "title": "xkcd", "url": "https://xkcd.com/atom.xml" },
+        { "title": "Flattery", "url": "https://flattery.sala.company/data/feed.xml" }
+      ]
+    }
+  ]
+}

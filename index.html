@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sala Reader</title>
+<meta name="description" content="A Google Reader-style RSS reader with AI search that finds articles by meaning.">
+<meta name="theme-color" content="#1a73e8">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="alternate" type="application/json" href="data/index.json">
+<link rel="stylesheet" href="style.css">
+<script>
+  // Apply the saved theme before first paint.
+  try { var t = JSON.parse(localStorage.getItem('sr.settings') || '{}').theme; if (t && t !== 'auto') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+<header class="top">
+  <button id="menuBtn" class="icon-btn only-narrow" aria-label="Show subscriptions" title="Subscriptions (u)">☰</button>
+  <a class="logo" href="#/home" title="Home (g h)"><span class="logo-mark" aria-hidden="true">S</span><span class="logo-text">Sala<b>Reader</b></span></a>
+  <form id="searchForm" class="search" role="search">
+    <span class="search-spark" aria-hidden="true">✨</span>
+    <input id="q" type="search" placeholder="Search by meaning, e.g. “cheap electric cars”" autocomplete="off" aria-label="Search all articles">
+    <kbd class="only-wide">/</kbd>
+  </form>
+  <div class="top-actions">
+    <span id="streak" class="streak" title="Reading streak: days in a row you've read something"></span>
+    <button id="surpriseBtn" class="icon-btn" title="Surprise me (x)" aria-label="Surprise me">🎲</button>
+    <button id="refreshBtn" class="icon-btn" title="Refresh (r)" aria-label="Refresh">⟳</button>
+    <button id="helpBtn" class="icon-btn only-wide" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+    <button id="settingsBtn" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+  </div>
+</header>
+
+<div class="layout">
+  <nav id="sidebar" aria-label="Subscriptions"></nav>
+  <div id="scrim" class="scrim" hidden></div>
+  <main id="main">
+    <div id="viewHeader" class="view-header"></div>
+    <div id="list" class="list" tabindex="-1"></div>
+  </main>
+</div>
+
+<dialog id="addDialog" class="sheet">
+  <form method="dialog" id="addForm">
+    <h2>Add a subscription</h2>
+    <label>Feed or website address<input id="addUrl" type="text" inputmode="url" placeholder="https://example.com or its RSS feed" required></label>
+    <label>Folder<input id="addFolder" type="text" list="folderList" placeholder="e.g. Tech"></label>
+    <datalist id="folderList"></datalist>
+    <p class="hint">It's saved in this browser and fetched straight away. To have the GitHub Action fetch it on every update and keep its history, also add it to <a id="editFeedsLink" target="_blank" rel="noopener">feeds.json</a>.</p>
+    <p id="addStatus" class="status" aria-live="polite"></p>
+    <div class="buttons"><button value="cancel" formnovalidate class="ghost">Cancel</button><button id="addSubmit" value="ok" class="primary">Subscribe</button></div>
+  </form>
+</dialog>
+
+<dialog id="topicDialog" class="sheet">
+  <form method="dialog" id="topicForm">
+    <h2>New AI topic</h2>
+    <p class="hint">An AI topic collects articles about something from all your feeds, even when they don't use your exact words.</p>
+    <label>What are you interested in?<input id="topicQuery" type="text" placeholder="e.g. space exploration, AI agents, climate tech" required></label>
+    <div class="chips" id="topicIdeas"></div>
+    <p id="topicStatus" class="status" aria-live="polite"></p>
+    <div class="buttons"><button value="cancel" formnovalidate class="ghost">Cancel</button><button value="ok" class="primary">Create topic</button></div>
+  </form>
+</dialog>
+
+<dialog id="settingsDialog" class="sheet wide">
+  <form method="dialog">
+    <h2>Settings</h2>
+    <section>
+      <h3>Look</h3>
+      <label>Theme
+        <select id="themeSel">
+          <option value="auto">Match my system</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="classic">Classic 2008</option>
+          <option value="paper">Paper</option>
+        </select>
+      </label>
+    </section>
+    <section>
+      <h3>AI search</h3>
+      <p class="hint">Search and AI topics run a small AI model in your browser (about 25 MB, downloaded once). It's free and nothing you search leaves your device.</p>
+      <label>How closely topics must match <span id="thresholdVal"></span>
+        <input id="thresholdRange" type="range" min="0.25" max="0.6" step="0.01">
+      </label>
+      <p class="hint">Looser → more articles, stricter → fewer, closer matches.</p>
+    </section>
+    <section>
+      <h3>Claude (optional)</h3>
+      <p class="hint">With your own Anthropic API key, you get ✨ Summarize on articles and ✨ Brief me on any list. The key stays in this browser and is sent only to api.anthropic.com. Get one at <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">platform.claude.com</a>.</p>
+      <label>API key<input id="keyInput" type="password" autocomplete="off" placeholder="sk-ant-…"></label>
+      <label>Model
+        <select id="modelSel">
+          <option value="claude-opus-5-5">Claude Opus 5.5 (best)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (cheapest)</option>
+        </select>
+      </label>
+    </section>
+    <section>
+      <h3>Subscriptions</h3>
+      <div class="buttons left">
+        <label class="button ghost">Import OPML<input id="opmlFile" type="file" accept=".opml,.xml,text/xml" hidden></label>
+        <button type="button" id="exportOpml" class="ghost">Export OPML</button>
+        <button type="button" id="exportFeeds" class="ghost">Download feeds.json</button>
+      </div>
+      <p class="hint">Import your subscriptions from Feedly, Inoreader or any reader. To make them permanent, download feeds.json and replace the one in the repo.</p>
+    </section>
+    <section>
+      <h3>Updates</h3>
+      <p class="hint" id="updatesInfo"></p>
+    </section>
+    <section>
+      <h3>Reset</h3>
+      <div class="buttons left"><button type="button" id="resetRead" class="ghost danger">Mark everything unread</button></div>
+    </section>
+    <div class="buttons"><button value="ok" class="primary">Done</button></div>
+  </form>
+</dialog>
+
+<dialog id="helpDialog" class="sheet">
+  <form method="dialog">
+    <h2>Keyboard shortcuts</h2>
+    <dl class="keys">
+      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous article</dd>
+      <dt><kbd>n</kbd> / <kbd>p</kbd></dt><dd>Move without opening</dd>
+      <dt><kbd>o</kbd> <kbd>Enter</kbd></dt><dd>Open / close article</dd>
+      <dt><kbd>s</kbd></dt><dd>Star</dd>
+      <dt><kbd>m</kbd></dt><dd>Mark read / unread</dd>
+      <dt><kbd>v</kbd></dt><dd>Open original in a new tab</dd>
+      <dt><kbd>Shift</kbd>+<kbd>a</kbd></dt><dd>Mark all as read</dd>
+      <dt><kbd>/</kbd></dt><dd>Search</dd>
+      <dt><kbd>x</kbd></dt><dd>Surprise me</dd>
+      <dt><kbd>1</kbd> / <kbd>2</kbd></dt><dd>List / expanded view</dd>
+      <dt><kbd>g</kbd> <kbd>h</kbd> · <kbd>g</kbd> <kbd>a</kbd> · <kbd>g</kbd> <kbd>s</kbd></dt><dd>Go home · all items · starred</dd>
+      <dt><kbd>r</kbd></dt><dd>Refresh</dd>
+      <dt><kbd>u</kbd></dt><dd>Show / hide subscriptions</dd>
+    </dl>
+    <div class="buttons"><button value="ok" class="primary">Got it</button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<canvas id="confetti" class="confetti" aria-hidden="true"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js"></script>
+<script type="module" src="app.js"></script>
+
+<!-- GoatCounter analytics (not loaded on localhost; paths are prefixed with the host so all *.sala.company apps share one dashboard) -->
+<script>
+  (function () {
+    if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
+    window.goatcounter = { endpoint: 'https://salacompany.goatcounter.com/count', path: function (p) { return location.host + p; } };
+    var s = document.createElement('script');
+    s.async = true;
+    s.src = 'https://gc.zgo.at/count.js';
+    s.setAttribute('data-goatcounter', 'https://salacompany.goatcounter.com/count');
+    document.body.appendChild(s);
+  })();
+</script>
+</body>
+</html>

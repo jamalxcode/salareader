@@ -1,0 +1,13 @@
+{
+  "name": "salareader",
+  "private": true,
+  "type": "module",
+  "description": "Fetches the feeds in feeds.json and builds data/ for the Sala Reader site.",
+  "scripts": {
+    "fetch": "node scripts/fetch.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.1",
+    "fast-xml-parser": "5.11.2"
+  }
+}
