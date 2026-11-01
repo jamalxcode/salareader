@@ -6,3 +6,12 @@ compatibility_date = "2026-10-01"
 # No request logs.
 [observability]
 enabled = false
+
+# Rate limit per visitor across all Cloudflare locations (free). Without
+# this binding the Worker falls back to a simpler per-instance limit.
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 60
+  period = 60

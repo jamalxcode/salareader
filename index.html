@@ -47,7 +47,7 @@
     <label>Feed or website address<input id="addUrl" type="text" inputmode="url" placeholder="https://example.com or its RSS feed" required></label>
     <label>Folder<input id="addFolder" type="text" list="folderList" placeholder="e.g. Tech"></label>
     <datalist id="folderList"></datalist>
-    <p class="hint">Your subscriptions are saved only on this device. This page fetches the feed straight from its site, or through your own relay if the site blocks web pages (⚙ Settings → Your feeds).</p>
+    <p class="hint">Your subscriptions are saved only on this device. This page fetches the feed straight from its site, or through the relay if the site blocks web pages (⚙ Settings → Your feeds).</p>
     <p id="addStatus" class="status" aria-live="polite"></p>
     <div class="buttons"><button value="cancel" formnovalidate class="ghost">Close</button><button id="addSubmit" value="ok" class="primary">Subscribe</button></div>
     <section id="discover" hidden>
@@ -111,9 +111,16 @@
     </section>
     <section>
       <h3>Your feeds</h3>
-      <p class="hint">Most sites don't let web pages read their feeds. For those, Sala Reader uses <b>your own relay</b>: a tiny Cloudflare Worker you run on your free Cloudflare account, which keeps no logs. Public relays are never used. <a href="https://github.com/jamalxcode/salareader#your-own-relay" target="_blank" rel="noopener">Set one up (5 minutes)</a></p>
-      <label>Relay address<input id="relayInput" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://salareader-relay.yourname.workers.dev"></label>
-      <label>Relay token (optional)<input id="relayToken" type="password" autocomplete="off" spellcheck="false" placeholder="The TOKEN secret you set on the Worker"></label>
+      <p class="hint">Most sites don't let web pages read their feeds. For those, Sala Reader asks a <b>relay</b>: a small server that fetches the feed and returns only feeds. Public CORS proxies are never used.</p>
+      <div id="relayModes" class="radios" role="radiogroup" aria-label="Relay">
+        <label class="check"><input type="radio" name="relayMode" value="shared"> <span><b>Shared Sala Reader relay</b> (default). Works right away. It keeps no logs and only ever sees the feed addresses it fetches, never who you are or what else you follow.</span></label>
+        <label class="check"><input type="radio" name="relayMode" value="own"> <span><b>My own relay</b>, on your free Cloudflare account, so no one else sees even the feed addresses. <a href="https://github.com/jamalxcode/salareader#your-own-relay" target="_blank" rel="noopener">Set one up (5 minutes)</a></span></label>
+        <label class="check"><input type="radio" name="relayMode" value="off"> <span><b>No relay.</b> Only the catalog, and feeds whose sites allow web pages to read them.</span></label>
+      </div>
+      <div id="ownRelay" hidden>
+        <label>Relay address<input id="relayInput" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://salareader-relay.yourname.workers.dev"></label>
+        <label>Relay token (optional)<input id="relayToken" type="password" autocomplete="off" spellcheck="false" placeholder="The TOKEN secret you set on the Worker"></label>
+      </div>
       <div class="buttons left"><button type="button" id="testRelay" class="ghost">Test relay</button><span id="relayStatus" class="status"></span></div>
     </section>
     <section>
@@ -135,7 +142,7 @@
       <p class="hint">Sala Reader has no accounts and no server-side storage. Here is everything that leaves this device:</p>
       <ul class="privacy">
         <li><b>The shared catalog</b> comes from this site. Everyone downloads the same files, so the site can't tell which feeds you follow or what you read.</li>
-        <li><b>Your own feeds</b> are fetched from the feed's site, or through your relay.</li>
+        <li><b>Your own feeds</b> are fetched from the feed's site, or through the relay you picked (shared by default). The relay sees only the feed's address, keeps no logs, and gets nothing that identifies you.</li>
         <li><b>Images in articles</b> load from their own sites when you open an article, with no referrer.</li>
         <li><b>The AI search model</b> is downloaded once from jsDelivr and Hugging Face. Searches run on this device.</li>
         <li><b>✨ Summarize and ✨ Brief me</b> send that article or those headlines to the AI assistant you chose, only when you press them.</li>

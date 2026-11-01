@@ -374,3 +374,6 @@ dialog label.button { display: inline-flex; margin: 0; font-weight: 400; }
 .privacy { margin: 4px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; }
 .privacy li { margin: 4px 0; }
 dialog label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.radios { display: flex; flex-direction: column; gap: 2px; }
+.radios label.check { align-items: flex-start; margin: 6px 0; }
+.radios input { margin-top: 3px; }

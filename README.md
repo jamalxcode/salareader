@@ -29,7 +29,7 @@ Here is everything that leaves the device:
 | What | Goes to | When |
 |---|---|---|
 | The shared catalog (`data/`) | this site | on load. Everyone gets the same files, including all articles in one `content.json`, so the site can't tell what you follow or read |
-| Your own feeds | the feed's site, or **your own relay** | when the page refreshes them |
+| Your own feeds | the feed's site, or the relay: [shared](#the-relay) by default, or your own | when the page refreshes them. The relay sees only the feed's address, keeps no logs, and gets nothing that identifies you |
 | Images inside articles | their own sites, with no referrer | when you open an article |
 | The AI search model | jsDelivr and Hugging Face | once. Searches run on the device |
 | An article or a list of headlines | the AI assistant you chose | only when you press ✨ Summarize or ✨ Brief me |
@@ -60,21 +60,34 @@ cron-job.org ──(every 30 min)──▶ GitHub API: run update.yml
   - `data/content.json`: full article text for every feed in one file, loaded when you open an article;
   - `data/vectors.json`: the AI vectors, loaded when you search.
 - **The `data` branch** keeps the last run's data, so history survives between runs. It's force-pushed as a single commit, so the repo doesn't grow.
-- **Your own feeds** (＋ Subscribe or OPML import, when not in the catalog) are fetched by the page itself, every time it opens and every 30 minutes while it's open. It asks the feed's site directly. Most sites block that, so it then asks [your own relay](#your-own-relay).
+- **Your own feeds** (＋ Subscribe or OPML import, when not in the catalog) are fetched by the page itself, every time it opens and every 30 minutes while it's open. It asks the feed's site directly. Most sites block that, so it then asks [the relay](#the-relay).
 
-## Your own relay
+## The relay
 
-Most websites don't let web pages read their feeds (CORS). Sala Reader then asks **your own relay**: `relay/worker.js`, a small Cloudflare Worker on your free Cloudflare account. It only answers your Sala Reader, stores nothing, and passes on nothing about you. Only you run it, so only you can see which feeds go through it.
+Most websites don't let web pages read their feeds (CORS). For those, Sala Reader asks a relay: `relay/worker.js`, a small Cloudflare Worker. In ⚙ Settings → **Your feeds** each reader picks one of three:
 
-**Set it up (about 5 minutes):**
+- **Shared Sala Reader relay** (default): `https://salareader-relay.jamal-akuna-matata.workers.dev`. It works with no setup.
+- **My own relay**: your own copy of the Worker, so no one else sees even which feed addresses you fetch.
+- **No relay**: only the catalog, plus feeds whose sites allow web pages to read them.
+
+The Worker is built to be shared safely:
+- **Feeds only.** It returns a response only if it's RSS or Atom. Given a web page, it returns just the feed links on it, never the page, so it can't be used as a general proxy.
+- **Rate limit:** 60 requests a minute per visitor.
+- **Cache:** 10 minutes per feed, so many readers of one feed cost one fetch.
+- **Only Sala Reader pages:** it checks the Origin header, blocks private and local addresses, and caps responses at 5 MB.
+- **No logs.** Workers Logs are off, it stores nothing, and it sends only a generic user agent to feed sites.
+
+On Cloudflare's free plan it handles 100,000 requests a day, roughly 100 to 200 active readers with 20 own feeds each. Past that, requests fail until the next day; the free plan never bills.
+
+### Your own relay
 
 1. Sign in at [dash.cloudflare.com](https://dash.cloudflare.com) (the free plan is plenty). Go to **Compute (Workers)** → **Workers & Pages** → **Create** → **Create Worker**, name it `salareader-relay`, and click **Deploy**.
 2. Click **Edit code**, replace everything with the contents of [`relay/worker.js`](relay/worker.js), and click **Deploy**.
-3. Optional but recommended: in the Worker's **Settings → Variables and Secrets**, add a **Secret** named `TOKEN` with any long random text. Only requests with that token are answered.
+3. Optional, for a private relay: in the Worker's **Settings → Runtime variables and secrets**, add a **Secret** named `TOKEN` (Production) with any long random text. Then only requests with that token are answered. Leave `TOKEN` out for a shared relay.
 4. In the Worker's **Settings → Observability**, make sure **Workers Logs** is off.
-5. Copy the Worker's address (`https://salareader-relay.<you>.workers.dev`). In Sala Reader, go to ⚙ Settings → **Your feeds**, paste it as the **Relay address**, add the token if you set one, and click **Test relay**.
+5. In Sala Reader, go to ⚙ Settings → **Your feeds** → **My own relay**. Paste the Worker's address (`https://salareader-relay.<you>.workers.dev`), add the token if you set one, and click **Test relay**.
 
-If you run Sala Reader at another address, add a variable `ALLOWED_ORIGIN` with that address (for example `https://reader.example.com`). With Node installed, `npx wrangler deploy` in `relay/` deploys it too.
+If you run Sala Reader at another address, add a variable `ALLOWED_ORIGIN` with that address (for example `https://reader.example.com`). With Node installed, `npx wrangler deploy` in `relay/` deploys it. That also adds a rate limit shared across all of Cloudflare's locations (see `wrangler.toml`).
 
 The relay address and token are part of your settings, so they're stored on your device and can travel in your backup.
 

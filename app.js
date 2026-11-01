@@ -103,7 +103,9 @@ const store = {
   keys() { return [...cache.keys()]; },
 };
 
-const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, relay: '', relayToken: '' };
+// The shared relay everyone uses unless they pick their own (relay/worker.js).
+const SHARED_RELAY = 'https://salareader-relay.jamal-akuna-matata.workers.dev';
+const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '' };
 
 const S = {
   index: { feeds: [], items: [], updated: 0 },
@@ -143,6 +145,13 @@ function loadState() {
   if (S.settings.claudeModel) S.settings.models = { ...S.settings.models, anthropic: S.settings.models?.anthropic || S.settings.claudeModel };
   if ('claudeKey' in S.settings || 'claudeModel' in S.settings) {
     delete S.settings.claudeKey; delete S.settings.claudeModel;
+    saveSettings();
+  }
+  // Before the shared relay, a relay address meant your own relay.
+  if (!store.get('settings', {}).relayMode) {
+    const own = S.settings.relay.trim().replace(/\/+$/, '');
+    if (own && own !== SHARED_RELAY) S.settings.relayMode = 'own';
+    else { S.settings.relayMode = 'shared'; S.settings.relay = ''; S.settings.relayToken = ''; }
     saveSettings();
   }
   // Earlier versions kept browser-added feeds separately.
@@ -279,23 +288,43 @@ async function ensureVectors(items, onProgress) {
 
 class NeedsRelay extends Error {}
 
-/** Fetches a feed straight from its site, or through your own relay. Never a public proxy. */
+/** The relay this device uses: the shared one, your own, or none. */
+function relayUrl() {
+  if (S.settings.relayMode === 'off') return '';
+  if (S.settings.relayMode === 'own') return S.settings.relay.trim().replace(/\/+$/, '');
+  return SHARED_RELAY;
+}
+
+/**
+ * Fetches a feed straight from its site, or through the relay. Never a public proxy.
+ * For a web page, the relay answers with just the feed links on it (JSON).
+ */
 async function fetchFeedText(url, { relayOnly = false } = {}) {
   if (!relayOnly) try {
     const res = await fetch(url, { signal: AbortSignal.timeout(15000), credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
     if (res.ok) return await res.text();
   } catch { /* the site doesn't let web pages read it: try the relay */ }
-  const relay = S.settings.relay.trim().replace(/\/+$/, '');
-  if (!relay) throw new NeedsRelay("This site doesn't let web pages read its feed. Set up your own relay in ⚙ Settings → Your feeds to add it.");
+  const relay = relayUrl();
+  const own = S.settings.relayMode === 'own';
+  if (!relay) {
+    throw new NeedsRelay(S.settings.relayMode === 'own'
+      ? "This site doesn't let web pages read its feed. Enter your relay's address in ⚙ Settings → Your feeds."
+      : "This site doesn't let web pages read its feed, and the relay is turned off in ⚙ Settings → Your feeds.");
+  }
+  const name = own ? 'your relay' : 'the shared relay';
   const res = await fetch(`${relay}/?url=${encodeURIComponent(url)}`, {
     signal: AbortSignal.timeout(20000),
     credentials: 'omit',
     referrerPolicy: 'no-referrer',
-    headers: S.settings.relayToken ? { 'X-Relay-Token': S.settings.relayToken } : {},
-  }).catch(() => { throw new Error("Couldn't reach your relay. Check its address in ⚙ Settings."); });
+    headers: own && S.settings.relayToken ? { 'X-Relay-Token': S.settings.relayToken } : {},
+  }).catch(() => { throw new Error(`Couldn't reach ${name}.${own ? ' Check its address in ⚙ Settings.' : ' Try again in a moment.'}`); });
   if (res.status === 401) throw new Error('Your relay rejected the token. Check it in ⚙ Settings.');
-  if (res.status === 403) throw new Error("Your relay doesn't allow this site. Check ALLOWED_ORIGIN in the Worker.");
-  if (!res.ok) throw new Error(`The feed answered HTTP ${res.status}`);
+  if (res.status === 403) throw new Error(own ? "Your relay doesn't allow this site. Check ALLOWED_ORIGIN in the Worker." : 'The shared relay refused this request.');
+  if (res.status === 429) throw new Error(`${own ? 'Your' : 'The shared'} relay is busy. Try again in a minute.`);
+  if (res.status === 415) throw new Error("That address isn't a feed, or a page that links to one.");
+  if (res.status === 413) throw new Error('That feed is too big.');
+  if (res.status === 404) throw new Error('Nothing was found at that address (404).');
+  if (!res.ok) throw new Error(`The feed couldn't be fetched (HTTP ${res.status}).`);
   return res.text();
 }
 
@@ -343,6 +372,8 @@ function parseFeedXML(xml, feedUrl, feedId) {
 }
 
 function discoverFeed(html, pageUrl) {
+  // The relay sends a page's feed links instead of the page.
+  if (/^\s*\{/.test(html)) { try { return JSON.parse(html).feeds?.[0] || ''; } catch { return ''; } }
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const link = doc.querySelector('link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]');
   if (!link) return '';
@@ -1108,6 +1139,8 @@ function openSettings() {
   $('#thresholdRange').value = S.settings.threshold;
   $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`;
   $('#updatesInfo').innerHTML = `The starter catalog is refreshed on GitHub whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} Your own feeds are fetched by this page when you open it, and every 30 minutes while it's open.`;
+  for (const r of document.querySelectorAll('input[name="relayMode"]')) r.checked = r.value === S.settings.relayMode;
+  $('#ownRelay').hidden = S.settings.relayMode !== 'own';
   $('#relayInput').value = S.settings.relay;
   $('#relayToken').value = S.settings.relayToken;
   $('#relayStatus').textContent = '';
@@ -1215,7 +1248,7 @@ async function importOPML(file) {
   await refreshOwnFeeds();
   rebuild(); render();
   const blocked = S.feeds.filter((f) => f.own && f.error).length;
-  if (blocked && !S.settings.relay) toast(`${blocked} feed${blocked === 1 ? '' : 's'} need your relay to be read. See ⚙ Settings → Your feeds.`, 6000);
+  if (blocked && !relayUrl()) toast(`${blocked} feed${blocked === 1 ? '' : 's'} need a relay to be read. See ⚙ Settings → Your feeds.`, 6000);
 }
 
 // ---------- sidebar on phones ----------
@@ -1360,15 +1393,22 @@ function wire() {
   $('#settingsDialog').addEventListener('close', () => render());
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
   $('#exportOpml').addEventListener('click', exportOPML);
+  $('#relayModes').addEventListener('change', (e) => {
+    if (e.target.name !== 'relayMode') return;
+    S.settings.relayMode = e.target.value;
+    saveSettings();
+    $('#ownRelay').hidden = S.settings.relayMode !== 'own';
+    $('#relayStatus').textContent = '';
+  });
   $('#relayInput').addEventListener('change', (e) => { S.settings.relay = e.target.value.trim(); saveSettings(); });
   $('#relayToken').addEventListener('change', (e) => { S.settings.relayToken = e.target.value.trim(); saveSettings(); });
   $('#testRelay').addEventListener('click', async () => {
     const st = $('#relayStatus');
-    if (!S.settings.relay) { st.textContent = 'Enter your relay address first.'; return; }
+    if (!relayUrl()) { st.textContent = S.settings.relayMode === 'off' ? 'The relay is turned off.' : 'Enter your relay address first.'; return; }
     st.textContent = 'Testing…';
     try {
       const xml = await fetchFeedText('https://xkcd.com/atom.xml', { relayOnly: true });
-      st.textContent = parseFeedXML(xml, 'https://xkcd.com/atom.xml', 'x') ? '✓ Your relay works.' : 'The relay answered, but not with a feed.';
+      st.textContent = parseFeedXML(xml, 'https://xkcd.com/atom.xml', 'x') ? `✓ ${S.settings.relayMode === 'own' ? 'Your' : 'The shared'} relay works.` : 'The relay answered, but not with a feed.';
     } catch (err) { st.textContent = err.message; }
   });
   $('#exportBackup').addEventListener('click', () => exportBackup($('#includeKeys').checked));
