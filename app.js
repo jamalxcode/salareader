@@ -196,6 +196,12 @@ function loadState() {
     else { S.settings.relayMode = 'shared'; S.settings.relay = ''; S.settings.relayToken = ''; }
     saveSettings();
   }
+  // Google News searches fetched before the Bing fallback existed: fetch them again now.
+  if (S.subs && !store.get('gnRetried', false)) {
+    for (const sub of S.subs) if (googleNewsQuery(sub.url) && !sub.via) delete sub.ok;
+    store.set('gnRetried', true);
+    saveSubs();
+  }
   // Earlier versions kept browser-added feeds separately. Keep them until
   // they're safely in the subscription list.
   const oldFeeds = store.get('localFeeds', null);
@@ -588,7 +594,11 @@ function googleNewsQuery(url) {
   try {
     const u = new URL(url);
     if (u.hostname !== 'news.google.com') return '';
-    return u.searchParams.get('q') || '';
+    // ?q=… (Google Reader-era /news?…&output=rss, /news/feeds?…, today's /rss/search?…)
+    if (u.searchParams.get('q')) return u.searchParams.get('q');
+    // 2017–2019 addresses put the words in the path: /news/rss/search/section/q/<words>/<words>
+    const m = /\/search\/section\/q\/([^/]+)/.exec(u.pathname);
+    return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : '';
   } catch { return ''; }
 }
 /** News-search links go through a click-tracking redirect; use the article's own address. */
@@ -613,18 +623,23 @@ const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
  */
 async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   let via = '';
+  const q = googleNewsQuery(feed.url);
   if (xml == null) {
     try {
       xml = await fetchFeedText(feed.url, { feed });
     } catch (e) {
       // Google blocks relays: a Google News search comes from Bing News instead.
-      const q = googleNewsQuery(feed.url);
       if (!q) throw e;
       xml = await fetchFeedText(newsSearchUrl(q));
       via = 'Bing News';
     }
   }
-  const parsed = parseFeedXML(xml, feed.url, feed.id);
+  let parsed = parseFeedXML(xml, feed.url, feed.id);
+  // Google sometimes answers with an empty list (or a page that isn't a feed): ask Bing too.
+  if (q && !via && (!parsed || !parsed.items.length)) {
+    const bing = parseFeedXML(await fetchFeedText(newsSearchUrl(q)), feed.url, feed.id);
+    if (bing?.items.length) { parsed = { ...bing, title: parsed?.title || bing.title }; via = 'Bing News'; }
+  }
   if (!parsed) throw new Error('Not an RSS or Atom feed');
   const target = adding ? feed : liveSub(feed.url);
   if (!target) return parsed;
@@ -1113,7 +1128,7 @@ function headerSub() {
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);
     if (f?.error) return `⚠ Couldn't fetch this feed${f.failSince ? ` (failing for ${agoText(f.failSince).replace(' ago', '')})` : ' last time'}: ${f.error}`;
-    if (f?.via) return `${unread} unread · Google blocks relays, so this search comes from ${f.via}.`;
+    if (f?.via) return `${unread} unread · Google News can't be read through the relay, so this search comes from ${f.via}.`;
   }
   return `${unread} unread${all.length !== unread ? ` of ${all.length}` : ''}`;
 }
@@ -1128,6 +1143,7 @@ function renderHeader() {
     <div class="vh-title">
       <h1>${feed ? avatar(feed, true) : ''}${esc(viewTitle())}</h1>
       <p class="sub">${esc(headerSub())}</p>
+      ${feed ? `<p class="feed-addr"><span title="This feed's address">${esc(feed.url)}</span>${feed.via ? ` <span class="muted">· from ${esc(feed.via)}</span>` : ''} <button class="linkish" data-act="copyaddr">Copy</button></p>` : ''}
     </div>
     <div class="vh-actions">
       ${filterable ? `<div class="seg" role="group" aria-label="Show"><button data-act="unread" class="${S.settings.unreadOnly ? 'on' : ''}">Unread</button><button data-act="allitems" class="${S.settings.unreadOnly ? '' : 'on'}">All</button></div>` : ''}
@@ -1763,6 +1779,7 @@ function wire() {
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
         case 'refresh': refresh(); return;
+        case 'copyaddr': { const f = S.feedById.get(S.view.id); if (f) navigator.clipboard?.writeText(f.url).then(() => toast('Address copied')).catch(() => {}); return; }
         case 'retry': {
           const sub = liveSub(S.feedById.get(S.view.id)?.url);
           if (!sub) return;
