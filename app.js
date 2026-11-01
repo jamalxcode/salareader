@@ -201,6 +201,13 @@ function loadState() {
     const clean = dedupeArticles(items);
     if (clean.length !== items.length) { S.ownItems[fid] = clean; store.set('own:' + fid, clean); }
   }
+  // YouTube channels saved as web pages (Feedly) failed before they were read through
+  // YouTube's feed: fetch them again now rather than after the failure back-off.
+  if (S.subs && !store.get('ytRetried', false)) {
+    for (const sub of S.subs) if (fetchAddress(sub.url) !== sub.url) { delete sub.ok; delete sub.lastTry; delete sub.failSince; sub.error = ''; }
+    store.set('ytRetried', true);
+    saveSubs();
+  }
   // Google News searches fetched before the Bing fallback existed: fetch them again now.
   if (S.subs && !store.get('gnRetried', false)) {
     for (const sub of S.subs) if (googleNewsQuery(sub.url) && !sub.via) delete sub.ok;
