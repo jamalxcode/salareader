@@ -360,3 +360,6 @@ dialog label.button { display: inline-flex; margin: 0; font-weight: 400; }
 
 .linkish { padding: 0; border: 0; background: none; color: var(--accent); font-size: inherit; }
 .linkish:hover { background: none; text-decoration: underline; }
+.via { margin: 8px 0 0 !important; font-size: 12px; color: var(--text-3); }
+.signin { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0; }
+.signin .hint { margin: 0; }

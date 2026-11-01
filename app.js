@@ -2,7 +2,7 @@
 // Data comes from data/ (built by scripts/fetch.mjs in a GitHub Action);
 // read/starred state, AI topics and extra feeds live in this browser.
 
-import { decodeVector, dot, embed, embedText, askClaude } from './ai.js';
+import { decodeVector, dot, embed, embedText, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const REPO = 'jamalxcode/salareader';
 const PROXIES = [
@@ -38,7 +38,7 @@ const S = {
   localItems: store.get('localItems', {}), // feedId -> items[]
   collapsed: store.get('collapsed', {}),
   days: store.get('days', []),         // days you read something (YYYY-MM-DD)
-  settings: { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, claudeKey: '', claudeModel: 'claude-opus-5-5', ...store.get('settings', {}) },
+  settings: { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, ...store.get('settings', {}) },
   view: { type: 'home' },
   list: [],
   shown: 0,
@@ -46,6 +46,14 @@ const S = {
   scores: null,         // id -> score (search / topic views)
 };
 const saveSettings = () => store.set('settings', S.settings);
+// Earlier versions had only Claude.
+if (S.settings.claudeKey) { S.settings.keys = { ...S.settings.keys, anthropic: S.settings.keys?.anthropic || S.settings.claudeKey }; }
+if (S.settings.claudeModel) { S.settings.models = { ...S.settings.models, anthropic: S.settings.models?.anthropic || S.settings.claudeModel }; }
+delete S.settings.claudeKey; delete S.settings.claudeModel;
+const ai = () => {
+  const p = provider(S.settings.aiProvider);
+  return { p, key: S.settings.keys[p.id] || '', model: S.settings.models[p.id] || 'auto' };
+};
 
 // ---------- small helpers ----------
 
@@ -544,7 +552,7 @@ function renderHeader() {
       ${filterable ? `<div class="seg" role="group" aria-label="Show"><button data-act="unread" class="${S.settings.unreadOnly ? 'on' : ''}">Unread</button><button data-act="allitems" class="${S.settings.unreadOnly ? '' : 'on'}">All</button></div>` : ''}
       <div class="seg" role="group" aria-label="View"><button data-act="list" class="${S.settings.mode === 'list' ? 'on' : ''}" title="List view (1)">☰ List</button><button data-act="expanded" class="${S.settings.mode === 'expanded' ? 'on' : ''}" title="Expanded view (2)">▤ Expanded</button></div>
       ${v.type !== 'starred' ? `<button data-act="markall" title="Mark all as read (Shift+A)">✓ Mark all read</button>` : ''}
-      <button data-act="brief" class="ai" title="Ask Claude for a short briefing on this list">✨ Brief me</button>
+      <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
       ${feed?.local ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
@@ -806,55 +814,64 @@ function openItemAnywhere(id) {
 // ---------- AI actions ----------
 
 function needKey() {
-  if (S.settings.claudeKey) return false;
-  toast('Add your Anthropic API key in ⚙ Settings to use ✨ Claude features', 4000);
+  const { p, key } = ai();
+  if (key) return false;
+  toast(`Add your ${p.name} API key in ⚙ Settings to use ✨ AI features`, 4000);
   openSettings();
   $('#keyInput').focus();
   return true;
+}
+
+/** Streams an AI answer into box, with a "via" line naming the assistant. */
+async function streamAI(box, { system, prompt, pool, working }) {
+  const { p, key, model } = ai();
+  box.hidden = false;
+  box.innerHTML = `<p class="loading">✨ ${esc(working)} <span class="muted">(${esc(p.name)})</span></p>`;
+  let acc = '';
+  try {
+    const res = await askAI({
+      providerId: p.id, apiKey: key, model, system, prompt,
+      onText: (t) => { acc += t; box.innerHTML = formatAI(acc, pool); },
+    });
+    box.innerHTML = formatAI(res.text, pool) + `<p class="via">✨ ${esc(p.name)} · ${esc(res.model)} · <button class="linkish" data-act="switchai">switch assistant</button></p>`;
+  } catch (e) {
+    const msg = /dynamically imported module|Importing a module script failed/i.test(e.message) ? "Couldn't load the AI library. Check your connection or ad blocker and try again." : e.message;
+    box.innerHTML = `<p class="error">${esc(msg)}</p><p class="via"><button class="linkish" data-act="switchai">Change assistant or key</button></p>`;
+  }
 }
 
 async function summarize(article) {
   if (needKey()) return;
   const it = S.byId.get(article.dataset.id) || S.starred[article.dataset.id];
   const out = article.querySelector('.ai-out');
-  out.hidden = false;
-  out.innerHTML = '<p class="loading">✨ Reading it for you…</p>';
   const html = it.c ?? (await feedContent(it.f))[it.id] ?? it.s;
   const text = strip(html || it.s).slice(0, 30000);
-  let acc = '';
-  try {
-    await askClaude({
-      apiKey: S.settings.claudeKey,
-      model: S.settings.claudeModel,
-      system: 'You summarize articles for a busy reader of an RSS reader. Reply with 3 short bullet points ("- " at the start of each) covering what happened and why it matters, then one line starting "Worth reading in full if:". Plain text, no headings.',
-      prompt: `Title: ${it.t}\nSource: ${S.feedById.get(it.f)?.title || ''}\n\n${text || '(only the title is available)'}`,
-      onText: (t) => { acc += t; out.innerHTML = formatAI(acc); },
-    });
-  } catch (e) {
-    out.innerHTML = `<p class="error">${esc(e.message)}</p>`;
-  }
+  await streamAI(out, {
+    working: 'Reading it for you…',
+    system: 'You summarize articles for a busy reader of an RSS reader. Reply with 3 short bullet points ("- " at the start of each) covering what happened and why it matters, then one line starting "Worth reading in full if:". Plain text, no headings.',
+    prompt: `Title: ${it.t}\nSource: ${S.feedById.get(it.f)?.title || ''}\n\n${text || '(only the title is available)'}`,
+  });
 }
 
 async function brief() {
   if (needKey()) return;
   const box = $('#brief');
   const pool = (S.view.type === 'home' ? S.items : S.list).filter((i) => S.view.type === 'search' || S.view.type === 'starred' || !isRead(i.id)).slice(0, 40);
-  box.hidden = false;
-  if (!pool.length) { box.innerHTML = '<p>Nothing unread to brief you on. 🎉</p>'; return; }
-  box.innerHTML = '<p class="loading">✨ Reading the headlines…</p>';
+  if (!pool.length) { box.hidden = false; box.innerHTML = '<p>Nothing unread to brief you on. 🎉</p>'; return; }
   const listing = pool.map((it, k) => `[${k + 1}] ${it.t} (${S.feedById.get(it.f)?.title || ''}, ${ago(it.d)}): ${it.s.slice(0, 200)}`).join('\n');
-  let acc = '';
-  try {
-    await askClaude({
-      apiKey: S.settings.claudeKey,
-      model: S.settings.claudeModel,
-      system: 'You write a quick, friendly briefing for someone opening their RSS reader. Group related stories into 3-6 short themed points ("- " bullets). Cite stories by their number in square brackets like [3]. Start with one sentence on the overall picture. Plain text, under 200 words.',
-      prompt: `${S.view.type === 'search' ? `They searched for: ${S.view.q}\n` : S.view.type === 'topic' ? `Topic: ${viewTitle()}\n` : ''}Stories:\n${listing}`,
-      onText: (t) => { acc += t; box.innerHTML = formatAI(acc, pool); },
-    });
-  } catch (e) {
-    box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
-  }
+  await streamAI(box, {
+    pool,
+    working: 'Reading the headlines…',
+    system: 'You write a quick, friendly briefing for someone opening their RSS reader. Group related stories into 3-6 short themed points ("- " bullets). Cite stories by their number in square brackets like [3]. Start with one sentence on the overall picture. Plain text, under 200 words.',
+    prompt: `${S.view.type === 'search' ? `They searched for: ${S.view.q}\n` : S.view.type === 'topic' ? `Topic: ${viewTitle()}\n` : ''}Stories:\n${listing}`,
+  });
+}
+
+function switchProvider(id) {
+  S.settings.aiProvider = id;
+  saveSettings();
+  const { p, key } = ai();
+  toast(`✨ AI assistant: ${p.name}${key ? '' : ' (add its key in ⚙ Settings)'}`);
 }
 
 function formatAI(text, pool) {
@@ -923,12 +940,30 @@ function celebrate() {
 function openSettings() {
   const d = $('#settingsDialog');
   $('#themeSel').value = S.settings.theme;
-  $('#keyInput').value = S.settings.claudeKey;
-  $('#modelSel').value = S.settings.claudeModel;
+  renderAISettings();
   $('#thresholdRange').value = S.settings.threshold;
   $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`;
   $('#updatesInfo').innerHTML = `Feeds are fetched by a GitHub Action whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} <a href="https://github.com/${REPO}/actions" target="_blank" rel="noopener">See runs</a> · <a href="https://github.com/${REPO}#updates-with-cron-joborg" target="_blank" rel="noopener">Setup</a>`;
   if (!d.open) d.showModal();
+}
+
+function renderAISettings() {
+  const { p, key, model } = ai();
+  $('#providerSel').innerHTML = PROVIDERS.map((x, i) => `<option value="${x.id}"${x.id === p.id ? ' selected' : ''}>${esc(x.name)}${S.settings.keys[x.id] ? ' ✓' : ''} (Alt+${i + 1})</option>`).join('');
+  $('#keyLabel').textContent = `${p.name} API key`;
+  $('#keyInput').value = key;
+  $('#keyInput').placeholder = p.keyHint;
+  $('#keyLink').href = p.keyUrl;
+  $('#keyLink').textContent = `Get your ${p.name} key`;
+  $('#keyNote').textContent = p.id === 'gemini' ? ' (free from Google AI Studio)' : p.id === 'openrouter' ? ' (one key for models from many companies)' : '';
+  $('#orSignIn').hidden = !p.signIn;
+  const listed = S.modelLists?.[p.id] || [];
+  const opts = p.models
+    ? p.models
+    : [['auto', p.auto ? `Auto (${p.auto})` : 'Auto (the newest general model your key can use)'], ...[...new Set([model, ...listed])].filter((m) => m && m !== 'auto').map((m) => [m, m])];
+  $('#modelSel').innerHTML = opts.map(([id, label]) => `<option value="${esc(id)}"${id === model || (p.models && model === 'auto' && id === p.models[0][0]) ? ' selected' : ''}>${esc(label)}</option>`).join('');
+  $('#listModelsBtn').hidden = !!p.models;
+  $('#modelStatus').textContent = '';
 }
 
 function applyTheme() {
@@ -1044,6 +1079,7 @@ function wire() {
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
         case 'refresh': refresh(); return;
+        case 'switchai': openSettings(); return;
         case 'newtopic': openTopic(); return;
         case 'more': renderList(false); return;
         case 'savetopic': openTopic(S.view.q); return;
@@ -1101,8 +1137,27 @@ function wire() {
 
   // Settings
   $('#themeSel').addEventListener('change', (e) => { S.settings.theme = e.target.value; saveSettings(); applyTheme(); });
-  $('#keyInput').addEventListener('change', (e) => { S.settings.claudeKey = e.target.value.trim(); saveSettings(); });
-  $('#modelSel').addEventListener('change', (e) => { S.settings.claudeModel = e.target.value; saveSettings(); });
+  $('#providerSel').addEventListener('change', (e) => { S.settings.aiProvider = e.target.value; saveSettings(); renderAISettings(); });
+  $('#keyInput').addEventListener('change', (e) => {
+    const { p } = ai();
+    const v = e.target.value.trim();
+    if (v) S.settings.keys[p.id] = v; else delete S.settings.keys[p.id];
+    saveSettings();
+    renderAISettings();
+  });
+  $('#modelSel').addEventListener('change', (e) => { S.settings.models[ai().p.id] = e.target.value; saveSettings(); });
+  $('#listModelsBtn').addEventListener('click', async () => {
+    const { p, key } = ai();
+    if (!key) { $('#modelStatus').textContent = `Add your ${p.name} key first.`; return; }
+    $('#modelStatus').textContent = 'Asking for the list…';
+    try {
+      const models = await listModels(p.id, key);
+      S.modelLists = { ...S.modelLists, [p.id]: models };
+      renderAISettings();
+      $('#modelStatus').textContent = `${models.length} models`;
+    } catch (err) { $('#modelStatus').textContent = err.message; }
+  });
+  $('#orSignInBtn').addEventListener('click', () => startOpenRouterSignIn());
   $('#thresholdRange').addEventListener('input', (e) => { S.settings.threshold = +e.target.value; $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`; saveSettings(); });
   $('#settingsDialog').addEventListener('close', () => render());
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
@@ -1113,6 +1168,13 @@ function wire() {
   // Keyboard
   let gPending = false;
   document.addEventListener('keydown', (e) => {
+    // Alt+1–6 switches the AI assistant, like ⌥⌘1–6 in jamalterm.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-6]$/.test(e.code)) {
+      e.preventDefault();
+      switchProvider(PROVIDERS[+e.code.slice(5) - 1].id);
+      if ($('#settingsDialog').open) renderAISettings();
+      return;
+    }
     if (e.target.closest('input, textarea, select, dialog[open]') || e.metaKey || e.ctrlKey || e.altKey) {
       if (e.key === 'Escape' && e.target === $('#q')) $('#q').blur();
       return;
@@ -1192,6 +1254,13 @@ async function refresh() {
 async function start() {
   applyTheme();
   wire();
+  finishOpenRouterSignIn().then((key) => {
+    if (!key) return;
+    S.settings.keys.openrouter = key;
+    S.settings.aiProvider = 'openrouter';
+    saveSettings();
+    toast('✨ Signed in to OpenRouter', 4000);
+  }).catch((e) => toast(e.message, 6000));
   renderStreak();
   await loadIndex(false);
   route();

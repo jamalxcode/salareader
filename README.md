@@ -11,7 +11,11 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 - **✨ AI search:** search by meaning, so “cheap electric cars” also finds “EV prices drop below $25k”. A small AI model (all-MiniLM-L6-v2, about 25 MB) runs in your browser, so it's free and private.
 - **✨ AI topics:** follow a subject across every feed, like Feedly's Leo. Each topic gets its own unread count in the sidebar.
 - **🔗 More like this** on every article, which also flags the same story covered by other feeds.
-- **✨ Summarize** and **✨ Brief me** (optional): add your own Anthropic API key in ⚙ Settings, and Claude summarizes an article or writes a short briefing on any list, with numbered links to the stories. The key stays in your browser.
+- **✨ Summarize** and **✨ Brief me** (optional): pick an AI assistant in ⚙ Settings, the same six as [jamalterm](https://github.com/jamalxcode/jamalterm): **Claude, ChatGPT, DeepSeek, Grok, OpenRouter or Gemini**. It summarizes an article or writes a short briefing on any list, with numbered links to the stories. Switch assistants with `Alt`+`1`–`6`.
+  - Claude, ChatGPT, DeepSeek and Grok use an API key from their company. Gemini takes a free key from [aistudio.google.com](https://aistudio.google.com/apikey). OpenRouter has **Sign in with OpenRouter** (your browser approves and the key is saved) or a key.
+  - The model is picked automatically: the newest general model your key can use, DeepSeek's `deepseek-v4-flash`, or OpenRouter's Auto Router. Claude defaults to Opus 5.5. Use **Show available models** to choose another.
+  - Keys stay in your browser and are sent only to that assistant's API. Usage is billed to that API account; a ChatGPT Plus subscription doesn't cover it.
+  - Gemini, ChatGPT and OpenRouter accept requests from web pages. If DeepSeek or Grok refuse them, the error says so: use their models through OpenRouter instead.
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
 - **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML or `feeds.json`.
 
