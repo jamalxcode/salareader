@@ -162,6 +162,7 @@ const S = {
   shown: 0,
   cur: -1,
   scores: null,         // id -> score (search / topic views)
+  unread: 0,            // running count of unread articles in your feeds
   version: 0,           // bumped whenever items or vectors change (topic results are cached per version)
 };
 
@@ -319,6 +320,7 @@ function rebuild() {
   let changed = false;
   for (const [id, t] of Object.entries(S.read)) if (t < cutoff && !S.byId.has(id)) { delete S.read[id]; changed = true; }
   if (changed) store.set('read', S.read);
+  S.unread = unreadOf(S.items);
   S.version++;
 }
 
@@ -722,15 +724,25 @@ function unsubscribe(id) {
 
 // ---------- read state, stars, streak ----------
 
+// Counts in the sidebar, header and tab title are redrawn once you pause,
+// not on every key press (that took ~60 ms with tens of thousands of articles).
+let countsTimer;
+function scheduleCounts() {
+  clearTimeout(countsTimer);
+  countsTimer = setTimeout(() => { renderSidebar(); renderHeaderCounts(); updateTitle(); }, 150);
+}
+
 function markRead(id, read = true) {
-  const before = totalUnread();
-  if (read) { if (!isRead(id)) S.read[id] = Date.now(); } else delete S.read[id];
+  const was = isRead(id);
+  if (read) { if (!was) S.read[id] = Date.now(); } else delete S.read[id];
+  if (was === read) return;
+  // The running unread total changes only for articles in your current feeds.
+  if (S.byId.has(id)) S.unread += read ? -1 : 1;
   store.set('read', S.read);
   if (read) noteActivity();
   updateEntryDom(id);
-  renderSidebar();
-  renderHeaderCounts();
-  if (read && before > 0 && totalUnread() === 0) celebrate();
+  scheduleCounts();
+  if (read && S.byId.has(id) && S.unread === 0) celebrate();
 }
 
 function markAllRead(items) {
@@ -739,6 +751,7 @@ function markAllRead(items) {
   let n = 0;
   for (const it of items) if (!isRead(it.id)) { S.read[it.id] = t; n++; }
   store.set('read', S.read);
+  S.unread = unreadOf(S.items);
   if (n) noteActivity();
   render();
   if (n) toast(`Marked ${n} as read`);
@@ -786,7 +799,7 @@ function renderStreak() {
 }
 
 const unreadOf = (items) => items.reduce((n, i) => n + (isRead(i.id) ? 0 : 1), 0);
-const totalUnread = () => unreadOf(S.items);
+const totalUnread = () => S.unread;
 
 // ---------- topics ----------
 
@@ -1193,12 +1206,16 @@ function renderHome() {
     </section>`;
 }
 
+function updateTitle() {
+  document.title = S.view.type === 'home' ? `Sala Reader${S.unread ? ` (${S.unread})` : ''}` : `${viewTitle()} · Sala Reader`;
+}
+
 function render() {
   renderSidebar();
   renderHeader();
   if (S.view.type === 'home') renderHome();
   else renderList();
-  document.title = S.view.type === 'home' ? `Sala Reader${totalUnread() ? ` (${totalUnread()})` : ''}` : `${viewTitle()} · Sala Reader`;
+  updateTitle();
 }
 
 function updateEntryDom(id) {
@@ -1213,7 +1230,7 @@ function updateEntryDom(id) {
     const bu = a.querySelector('.actions [data-act="unread"]');
     if (bu) bu.textContent = isRead(id) ? '◌ Keep unread' : '● Mark read';
   }
-  document.title = S.view.type === 'home' ? `Sala Reader${totalUnread() ? ` (${totalUnread()})` : ''}` : `${viewTitle()} · Sala Reader`;
+  updateTitle();
 }
 
 // ---------- opening entries ----------
@@ -1793,16 +1810,18 @@ function wire() {
   // Keyboard
   let gPending = false;
   document.addEventListener('keydown', (e) => {
+    // Keys pressed with nothing focused can come from the document itself.
+    const el = e.target instanceof Element ? e.target : document.body;
     // Alt+1–6 switches the AI assistant, like ⌥⌘1–6 in jamalterm.
-    if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-6]$/.test(e.code) && !e.target.closest('input, textarea, [contenteditable]')) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-6]$/.test(e.code) && !el.closest('input, textarea, [contenteditable]')) {
       e.preventDefault();
       switchProvider(PROVIDERS[+e.code.slice(5) - 1].id);
       if ($('#settingsDialog').open) renderAISettings();
       return;
     }
     // Enter or Space on a focused link or button does what it normally does.
-    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('a[href], button, label, summary')) return;
-    if (e.target.closest('input, textarea, select, dialog[open]') || e.metaKey || e.ctrlKey || e.altKey) {
+    if ((e.key === 'Enter' || e.key === ' ') && el.closest('a[href], button, label, summary')) return;
+    if (el.closest('input, textarea, select, dialog[open]') || e.metaKey || e.ctrlKey || e.altKey) {
       if (e.key === 'Escape' && e.target === $('#q')) $('#q').blur();
       return;
     }

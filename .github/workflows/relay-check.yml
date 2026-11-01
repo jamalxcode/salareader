@@ -9,6 +9,9 @@ on:
       relay:
         description: Relay address
         default: https://salareader-relay.jamal-akuna-matata.workers.dev
+      urls:
+        description: Optional feed addresses to try (space-separated), directly and through the relay
+        default: ''
 
 permissions: {}
 
@@ -19,6 +22,7 @@ jobs:
       - name: Check
         env:
           RELAY: ${{ inputs.relay }}
+          URLS: ${{ inputs.urls }}
         run: |
           fail=0
           check() { # name, expected status, curl args...
@@ -37,4 +41,12 @@ jobs:
           check "no origin is refused"            403 "$RELAY/?url=https://xkcd.com/atom.xml"
           check "old address still allowed"       200 -H "Origin: https://salareader.sala.company" "$RELAY/?url=https://xkcd.com/atom.xml"
           curl -s -D - -o /dev/null -H "$O" "$RELAY/?url=https://simonwillison.net/" | grep -i '^x-relay-kind' || { echo "FAIL missing X-Relay-Kind header (old relay code?)"; fail=1; }
+          for u in $URLS; do
+            enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$u")
+            d=$(curl -s -o /tmp/d -w '%{http_code} %{content_type} %{url_effective}' -L --max-time 30 -A 'SalaReader/1.0 (+https://reader.sala.company)' "$u")
+            r=$(curl -s -o /tmp/r -w '%{http_code}' --max-time 30 -H "$O" "$RELAY/?url=$enc")
+            echo "URL    $u"
+            echo "  direct: $d :: $(head -c 120 /tmp/d | tr '\n' ' ')"
+            echo "  relay:  $r :: $(head -c 160 /tmp/r | tr '\n' ' ')"
+          done
           exit $fail
