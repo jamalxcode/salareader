@@ -105,6 +105,18 @@ function xhtmlToHtml(xml) {
 
 const contentHtml = (c) => text(c);
 
+/** Same link (without tracking bits, http/https, www) and same title = same article. */
+function articleKey(link, title) {
+  let l = '';
+  try {
+    const u = new URL(link);
+    for (const k of [...u.searchParams.keys()]) if (/^(utm_|fbclid$|gclid$|mc_|ncid$|guccounter$|ref$|src$|cmpid$)/i.test(k)) u.searchParams.delete(k);
+    const q = u.searchParams.toString();
+    l = `${u.hostname.replace(/^www\./, '')}${u.pathname.replace(/\/+$/, '')}${q ? '?' + q : ''}`.toLowerCase();
+  } catch { /* no link */ }
+  return `${l}|${(title || '').trim().toLowerCase()}`;
+}
+
 /** News-search links go through a click-tracking redirect; use the article's own address. */
 function unwrapLink(link) {
   try {
@@ -259,8 +271,11 @@ async function main() {
       if (!f.title && parsed.title) feed.title = parsed.title;
       if (parsed.site) feed.site = parsed.site;
       feed.ok = now;
+      // The same article under a new guid keeps its old id (so read marks stay).
+      const idByKey = new Map([...map.values()].map((it) => [articleKey(it.l, it.t), it.id]));
       parsed.items.forEach((p, idx) => {
-        const itemId = sha(`${f.url}|${p.guid}`);
+        let itemId = sha(`${f.url}|${p.guid}`);
+        if (!map.has(itemId) && idByKey.has(articleKey(p.link, p.title))) itemId = idByKey.get(articleKey(p.link, p.title));
         const existing = map.get(itemId);
         // Undated items keep their first-seen time; idx keeps feed order stable.
         // Future dates (wrong time zones) are capped at the time we first saw the item.
@@ -280,9 +295,12 @@ async function main() {
       feed.error = String(e.message || e).slice(0, 200);
       console.log(`FAIL ${feed.title}: ${feed.error}`);
     }
+    // One copy per article (earlier runs may have stored one twice).
+    const keyed = new Set();
     const keep = [...map.values()]
       .filter((it) => it.d > now - KEEP_DAYS * 864e5)
       .sort((a, b) => b.d - a.d)
+      .filter((it) => { const k = articleKey(it.l, it.t); if (keyed.has(k)) return false; keyed.add(k); return true; })
       .slice(0, KEEP_PER_FEED);
     feed.count = keep.length;
     return { feed, items: keep };

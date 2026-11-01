@@ -196,6 +196,11 @@ function loadState() {
     else { S.settings.relayMode = 'shared'; S.settings.relay = ''; S.settings.relayToken = ''; }
     saveSettings();
   }
+  // Articles saved twice by earlier versions (same article under two ids): keep one.
+  for (const [fid, items] of Object.entries(S.ownItems)) {
+    const clean = dedupeArticles(items);
+    if (clean.length !== items.length) { S.ownItems[fid] = clean; store.set('own:' + fid, clean); }
+  }
   // Google News searches fetched before the Bing fallback existed: fetch them again now.
   if (S.subs && !store.get('gnRetried', false)) {
     for (const sub of S.subs) if (googleNewsQuery(sub.url) && !sub.via) delete sub.ok;
@@ -623,6 +628,50 @@ const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
  * the feed isn't in your list yet; otherwise nothing is written if you
  * unsubscribed while it was being fetched.
  */
+/**
+ * What makes two items the same article: the same link (without tracking
+ * bits, http/https or www) and the same title. Both, because some feeds point
+ * every item at one page.
+ */
+function articleKey(it) {
+  return `${linkKey(it)}|${(it.t || '').trim().toLowerCase()}`;
+}
+function linkKey(it) {
+  if (!it.l) return '';
+  try {
+    const u = new URL(it.l);
+    for (const k of [...u.searchParams.keys()]) if (/^(utm_|fbclid$|gclid$|mc_|ncid$|guccounter$|ref$|src$|cmpid$)/i.test(k)) u.searchParams.delete(k);
+    const q = u.searchParams.toString();
+    return `${u.hostname.replace(/^www\./, '')}${u.pathname.replace(/\/+$/, '')}${q ? '?' + q : ''}`.toLowerCase();
+  } catch { return ''; }
+}
+
+/** Read and starred marks follow an article to its new id. */
+function moveMarks(fromId, toId) {
+  if (fromId === toId) return;
+  if (fromId in S.read) { S.read[toId] = S.read[fromId]; delete S.read[fromId]; store.set('read', S.read); }
+  if (S.starred[fromId]) { S.starred[toId] = { ...S.starred[fromId], id: toId }; delete S.starred[fromId]; store.set('starred', S.starred); }
+}
+
+/** Keeps the newest copy of each article (list sorted newest first); marks move to it. */
+function dedupeArticles(items) {
+  const seen = new Map();
+  const out = [];
+  for (const it of items) {
+    const k = articleKey(it);
+    const kept = seen.get(k);
+    if (kept) {
+      // Read if either copy was read; starred if either was starred.
+      if (it.id in S.read && !(kept.id in S.read)) { S.read[kept.id] = S.read[it.id]; store.set('read', S.read); }
+      if (S.starred[it.id] && !S.starred[kept.id]) { S.starred[kept.id] = { ...S.starred[it.id], id: kept.id }; store.set('starred', S.starred); }
+      continue;
+    }
+    seen.set(k, it);
+    out.push(it);
+  }
+  return out;
+}
+
 /** News searches sometimes get a non-feed answer for a moment: one retry. */
 async function fetchFeedTextRetry(url, opts) {
   const text = await fetchFeedText(url, opts);
@@ -657,12 +706,18 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   const target = adding ? feed : liveSub(feed.url);
   if (!target) return parsed;
   const old = new Map((S.ownItems[target.id] || []).map((i) => [i.id, i]));
+  // The same article can come back under a new id (feeds change their guids,
+  // http → https…). Match by link too, so it replaces the old copy instead of
+  // showing twice, and keeps your read and starred marks.
+  const byKey = new Map([...old.values()].map((i) => [articleKey(i), i]));
   for (const it of parsed.items) {
-    const prev = old.get(it.id);
+    let prev = old.get(it.id);
+    const twin = !prev && byKey.get(articleKey(it));
+    if (twin) { old.delete(twin.id); moveMarks(twin.id, it.id); prev = twin; }
     // Undated items keep the time we first saw them.
     old.set(it.id, { ...prev, ...it, d: it.dated ? it.d : prev?.d ?? it.d });
   }
-  S.ownItems[target.id] = [...old.values()].sort((a, b) => b.d - a.d).slice(0, OWN_ITEMS_PER_FEED);
+  S.ownItems[target.id] = dedupeArticles([...old.values()].sort((a, b) => b.d - a.d)).slice(0, OWN_ITEMS_PER_FEED);
   // A feed that left the catalog: what came before isn't news to you.
   if (target.convertedAt) {
     for (const it of S.ownItems[target.id]) if (it.d < target.convertedAt && !isRead(it.id)) S.read[it.id] = Date.now();

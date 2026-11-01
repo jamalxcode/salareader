@@ -48,5 +48,10 @@ jobs:
             echo "URL    $u"
             echo "  direct: $d :: $(head -c 120 /tmp/d | tr '\n' ' ')"
             echo "  relay:  $r :: $(head -c 160 /tmp/r | tr '\n' ' ')"
+            # How the first items identify themselves (guid / link), twice, to spot ids that change.
+            for k in 1 2; do
+              curl -s --max-time 30 -H "$O" "$RELAY/?url=$enc&_=$k" > /tmp/r$k
+              echo "  ids (relay $k): $(grep -o '<guid[^>]*>[^<]*</guid>\|<link>[^<]*</link>\|<id>[^<]*</id>' /tmp/r$k | sed -n '2,5p' | tr '\n' ' ' | head -c 400)"
+            done
           done
           exit $fail
