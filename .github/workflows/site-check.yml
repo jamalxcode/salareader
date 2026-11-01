@@ -1,0 +1,28 @@
+name: Check the live site
+
+# Run by hand (Actions → Check the live site → Run workflow). Opens the site
+# in Chrome and checks: it loads, articles open, AI search works (model
+# download), the relay adds a website, and which AI assistants accept
+# requests from web pages.
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: Site address
+        default: https://reader.sala.company
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --no-audit --no-fund playwright@1.64.1 && npx playwright install --with-deps chromium
+      - run: node tests/site-check.mjs
+        env:
+          SITE: ${{ inputs.site }}
