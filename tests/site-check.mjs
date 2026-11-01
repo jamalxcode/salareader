@@ -20,7 +20,7 @@ page.on('pageerror', (e) => pageErrors.push(e.message));
 page.on('dialog', (d) => d.accept());
 
 await step('site loads', async () => {
-  await page.goto(SITE + '/', { waitUntil: 'load' });
+  await page.goto(SITE + '/?debug', { waitUntil: 'load' });
   await page.waitForSelector('.hero', { timeout: 30000 });
   return await page.title();
 });
@@ -36,7 +36,7 @@ await step('catalog articles are listed', async () => {
 });
 
 await step('opening an article shows its text', async () => {
-  await page.goto(SITE + '/#/all');
+  await page.goto(SITE + '/?debug#/all');
   await page.waitForSelector('article.entry');
   await page.click('article.entry .row');
   await page.waitForFunction(() => document.querySelector('.body [data-content]')?.dataset.filled && !document.querySelector('.body [data-content] .loading'), null, { timeout: 30000 });
@@ -80,7 +80,7 @@ await step('AI search by meaning (downloads the model)', async () => {
 });
 
 await step('More like this', async () => {
-  await page.goto(SITE + '/#/all');
+  await page.goto(SITE + '/?debug#/all');
   await page.waitForSelector('article.entry');
   await page.click('article.entry .row');
   await page.waitForSelector('.body [data-act="related"]');
@@ -92,7 +92,7 @@ await step('More like this', async () => {
 });
 
 await step('add a website through the shared relay', async () => {
-  await page.goto(SITE + '/#/home');
+  await page.goto(SITE + '/?debug#/home');
   await page.click('#addBtn');
   await page.fill('#addUrl', 'https://daringfireball.net/');
   await page.click('#addSubmit');
@@ -123,7 +123,7 @@ await step('diagnose: Bing news feed in the browser', async () => {
 });
 
 await step('follow a news search (words in Subscribe)', async () => {
-  await page.goto(SITE + '/#/home');
+  await page.goto(SITE + '/?debug#/home');
   await page.click('#addBtn');
   await page.fill('#addUrl', 'tbilisi');
   await page.press('#addUrl', 'Enter');
@@ -149,6 +149,13 @@ await step('old Google News search address works (via Bing News)', async () => {
   const dbg = await page.evaluate(() => new Promise((res) => { const r = indexedDB.open('salareader'); r.onsuccess = () => { const tx = r.result.transaction('kv'); const os = tx.objectStore('kv'); const out = {}; const q = os.openCursor(); q.onsuccess = () => { const c = q.result; if (c) { if (c.key === 'read' || c.key === 'subs' || c.key.startsWith('own:')) out[c.key] = c.value; c.continue(); } }; tx.oncomplete = () => res(out); }; }));
   const read = Object.keys(dbg.read || {});
   const own = Object.entries(dbg).filter(([k]) => k.startsWith('own:')).map(([k, items]) => ({ feed: k, n: items.length, readHere: items.filter((i) => read.includes(i.id)).map((i) => ({ id: i.id, f: i.f, t: i.t.slice(0, 40), l: i.l })) }));
+  const mem = await page.evaluate(() => {
+    const S = window.__salareader; if (!S) return 'no debug hook';
+    const id = location.hash.split('/')[2];
+    const items = S.items.filter((i) => i.f === id);
+    return { view: location.hash, items: items.length, unreadCounted: items.filter((i) => !(i.id in S.read)).length, readInMemory: items.filter((i) => i.id in S.read).map((i) => ({ id: i.id, t: i.t.slice(0, 40) })), dupIds: items.length - new Set(items.map((i) => i.id)).size, ownItemsLen: (S.ownItems[id] || []).length, rowsShown: document.querySelectorAll('article.entry').length };
+  });
+  info('in-memory debug', JSON.stringify(mem));
   info('read-state debug', JSON.stringify({ read, subs: (dbg.subs || []).filter((x) => x.own).map((x) => ({ id: x.id, url: x.url.slice(0, 60), via: x.via })), own }));
   return sub;
 });
@@ -216,9 +223,9 @@ async function axe(p, label) {
     .map((v) => `${v.impact} ${v.id} (${v.nodes.length}): ${v.nodes.slice(0, 2).map((n) => n.target.join(' ')).join(', ')}`));
   if (res.length) { for (const r of res) info(`a11y ${label}`, r); throw new Error(`${res.length} serious/critical accessibility problems (listed above)`); }
 }
-await step('accessibility: home', async () => { await page.goto(SITE + '/#/home'); await page.waitForSelector('.hero'); await axe(page, 'home'); });
+await step('accessibility: home', async () => { await page.goto(SITE + '/?debug#/home'); await page.waitForSelector('.hero'); await axe(page, 'home'); });
 await step('accessibility: article list with an open article', async () => {
-  await page.goto(SITE + '/#/all'); await page.reload(); await page.waitForSelector('article.entry');
+  await page.goto(SITE + '/?debug#/all'); await page.reload(); await page.waitForSelector('article.entry');
   await page.click('article.entry .row'); await page.waitForSelector('.body .actions');
   await axe(page, 'list');
 });
@@ -229,7 +236,7 @@ await step('accessibility: Settings', async () => {
 });
 await step('accessibility: dark theme contrast', async () => {
   await page.emulateMedia({ colorScheme: 'dark' });
-  await page.goto(SITE + '/#/all'); await page.reload(); await page.waitForSelector('article.entry');
+  await page.goto(SITE + '/?debug#/all'); await page.reload(); await page.waitForSelector('article.entry');
   await axe(page, 'dark');
   await page.emulateMedia({ colorScheme: 'light' });
 });

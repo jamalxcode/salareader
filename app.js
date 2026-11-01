@@ -218,6 +218,8 @@ function loadState() {
     }
   }
 }
+// For diagnosing on your own device: open the reader with ?debug to inspect its state in the console.
+if (new URLSearchParams(location.search).has('debug')) window.__salareader = S;
 const saveSettings = () => store.set('settings', S.settings);
 const saveSubs = () => store.set('subs', S.subs);
 const saveOwnFeed = (id) => { if (S.ownItems[id]) store.set('own:' + id, S.ownItems[id]); else store.del('own:' + id); };
