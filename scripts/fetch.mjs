@@ -98,11 +98,21 @@ function absolute(url, base) {
  * split into nodes (losing the text between tags). Keep it as HTML text.
  */
 function xhtmlToHtml(xml) {
-  return xml.replace(/<(content|summary)\b([^>]*)\btype=["']xhtml["']([^>]*)>([\s\S]*?)<\/\1>/g,
+  // (?<!\/) skips an empty <content type="xhtml"/>, which would otherwise swallow the next entry.
+  return xml.replace(/<(content|summary)\b([^>]*)\btype=["']xhtml["']([^>]*?)(?<!\/)>([\s\S]*?)<\/\1>/g,
     (m, tag, a, b, inner) => `<${tag}${a}type="html"${b}><![CDATA[${inner.replace(/]]>/g, ']]&gt;')}]]></${tag}>`);
 }
 
 const contentHtml = (c) => text(c);
+
+/** News-search links go through a click-tracking redirect; use the article's own address. */
+function unwrapLink(link) {
+  try {
+    const u = new URL(link);
+    if (/(^|\.)bing\.com$/.test(u.hostname) && u.searchParams.get('url')) return absolute(u.searchParams.get('url')) || link;
+  } catch { /* not a URL */ }
+  return link;
+}
 
 export function parseFeed(xml, feedUrl) {
   const doc = parser.parse(xhtmlToHtml(xml));
@@ -120,18 +130,18 @@ export function parseFeed(xml, feedUrl) {
   };
   // Atom's xml:base sets the address relative links are resolved against.
   const feedBase = absolute(channel['@xml:base'] || '', feedUrl) || feedUrl;
-  const seenGuids = new Set();
+  const guidCount = new Map();
+  for (const it of items) { const g = text(it.guid) || text(it.id); if (g) guidCount.set(g, (guidCount.get(g) || 0) + 1); }
   for (const it of items) {
     const title = stripTags(text(it.title)) || '(untitled)';
     const base = absolute(it['@xml:base'] || '', feedBase) || (kind === 'atom' ? feedBase : out.site || feedUrl);
     // An RSS guid is a link only if it isn't marked isPermaLink="false" and is a web address.
     const guidObj = arr(it.guid)[0];
     const guidIsLink = !(typeof guidObj === 'object' && guidObj?.['@isPermaLink'] === 'false') && /^https?:\/\//i.test(text(it.guid));
-    const link = absolute(kind === 'atom' ? atomLink(it.link) : text(arr(it.link)[0]) || (guidIsLink ? text(it.guid) : ''), base);
+    const link = unwrapLink(absolute(kind === 'atom' ? atomLink(it.link) : text(arr(it.link)[0]) || (guidIsLink ? text(it.guid) : ''), base));
     let guid = text(it.guid) || text(it.id) || link || title;
-    // Two items with the same id would collapse into one.
-    if (seenGuids.has(guid)) guid = `${guid}|${link || title}`;
-    seenGuids.add(guid);
+    // Items sharing an id would collapse into one: tell every copy apart by its link.
+    if (guidCount.get(guid) > 1) guid = `${guid}|${link || title}`;
     const html = text(it['content:encoded']) || contentHtml(it.content) || text(it.description) || contentHtml(it.summary) || '';
     const dateStr = text(it.pubDate) || text(it.published) || text(it.updated) || text(it['dc:date']);
     let d = Date.parse(dateStr);

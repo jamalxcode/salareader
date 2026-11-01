@@ -103,6 +103,31 @@ await step('add a website through the shared relay', async () => {
   return `${await page.$$eval('article.entry', (a) => a.length)} articles`;
 });
 
+await step('follow a news search (words in Subscribe)', async () => {
+  await page.goto(SITE + '/#/home');
+  await page.click('#addBtn');
+  await page.fill('#addUrl', 'tbilisi');
+  await page.press('#addUrl', 'Enter');
+  await page.waitForFunction(() => location.hash.startsWith('#/feed/L') || /couldn|isn't|refus|blocks/i.test(document.querySelector('#addStatus')?.textContent || ''), null, { timeout: 60000 });
+  const hash = await page.evaluate(() => location.hash);
+  if (!hash.startsWith('#/feed/L')) throw new Error(await page.$eval('#addStatus', (e) => e.textContent));
+  await page.waitForSelector('article.entry', { timeout: 20000 });
+  await page.click('article.entry .line');
+  const href = await page.$eval('.body h2 a', (a) => a.href);
+  if (/bing\.com\/news\/apiclick/.test(href)) throw new Error('article link still goes through Bing: ' + href);
+  return `${await page.$$eval('article.entry', (a) => a.length)} articles, first links to ${new URL(href).hostname}`;
+});
+
+await step('old Google News search address works (via Bing News)', async () => {
+  await page.evaluate(() => { const f = new File([`<?xml version="1.0"?><opml version="1.0"><body><outline type="rss" text="tbilisi - Google News" xmlUrl="https://news.google.com/news?q=tbilisi&amp;output=rss"/></body></opml>`], 'gn.opml', { type: 'text/xml' }); const dt = new DataTransfer(); dt.items.add(f); const inp = document.querySelector('#opmlFile'); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true })); });
+  await page.waitForFunction(() => !document.querySelector('.nav-note.progress') && [...document.querySelectorAll('#sidebar a.feed')].some((a) => /Google News/.test(a.textContent)), null, { timeout: 60000 });
+  await page.click('#sidebar a.feed >> text=Google News');
+  await page.waitForSelector('#viewHeader .sub');
+  const sub = await page.$eval('#viewHeader .sub', (e) => e.textContent);
+  if (/Couldn't/.test(sub)) throw new Error(sub);
+  return sub;
+});
+
 // Each assistant gets a fake key. A "key rejected" answer means the browser
 // reached the company's API (it accepts requests from web pages); "couldn't
 // reach" means it blocks them (CORS) or is down.

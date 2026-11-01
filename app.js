@@ -265,7 +265,8 @@ function toast(msg, ms = 2600) {
 /** Loads the shared catalog. Returns false if it couldn't (a catalog already loaded is kept). */
 async function loadIndex(bust) {
   try {
-    const res = await fetch(`data/index.json${bust ? `?t=${Date.now()}` : ''}`, { cache: bust ? 'no-store' : 'default' });
+    // no-cache: always check for a newer copy (a stale one could look like feeds left the catalog).
+    const res = await fetch(`data/index.json${bust ? `?t=${Date.now()}` : ''}`, { cache: bust ? 'no-store' : 'no-cache' });
     if (!res.ok) throw new Error(res.status);
     S.index = await res.json();
   } catch {
@@ -287,8 +288,14 @@ async function loadIndex(bust) {
     // working for you: this page fetches it from now on.
     const inCatalog = catalogByUrl();
     let moved = 0;
-    for (const sub of S.subs) if (!sub.own && !inCatalog.has(sub.url)) { sub.own = true; sub.id = 'L' + hash(sub.url); moved++; }
-    if (moved) saveSubs();
+    for (const sub of S.subs) {
+      if (sub.own || inCatalog.has(sub.url)) continue;
+      const oldId = sub.id;
+      Object.assign(sub, { own: true, id: 'L' + hash(sub.url), convertedAt: S.index.updated || Date.now() });
+      for (const st of Object.values(S.starred)) if (st.f === oldId) st.f = sub.id;
+      moved++;
+    }
+    if (moved) { saveSubs(); store.set('starred', S.starred); }
     // Articles stored for feeds that aren't your own any more (unsubscribed, or now in the catalog).
     const catalog = catalogByUrl();
     const ownIds = new Set(S.subs.filter((x) => x.own && !catalog.has(x.url)).map((x) => x.id));
@@ -470,8 +477,18 @@ async function fetchFeedText(url, { relayOnly = false, feed = null } = {}) {
   if (res.status === 429) throw new Error(`${own ? 'Your' : 'The shared'} relay is busy. Try again in a minute.`);
   if (res.status === 415) throw new Error("That address isn't a feed, or a page that links to one.");
   if (res.status === 413) throw new Error('That feed is too big.');
-  if (res.status === 404) throw new Error('Nothing was found at that address (404).');
-  if (!res.ok) throw new Error(`The feed couldn't be fetched (HTTP ${res.status}).`);
+  if (res.status === 404) throw new Error('Nothing was found at that address (404). The feed may have moved or closed.');
+  if (!res.ok) {
+    // The relay says what the feed's site answered.
+    const site = Number(/site answered HTTP (\d+)/.exec(await res.text().catch(() => ''))?.[1]);
+    if (/(^|\.)google\.com$/.test(host(url)) && [403, 429, 503].includes(site)) throw new Error('Google blocks requests from relays, so this Google feed can\'t be read here.');
+    if (site === 404 || site === 410) throw new Error(`The feed is gone (HTTP ${site}). The site may have moved or closed it.`);
+    if (site === 401 || site === 403) throw new Error(`The site refuses automated readers (HTTP ${site}).`);
+    if (site === 429) throw new Error('The site is limiting requests (HTTP 429). It will be tried again later.');
+    if (site >= 500) throw new Error(`The site is having problems (HTTP ${site}). It will be tried again later.`);
+    if (site) throw new Error(`The site answered HTTP ${site}.`);
+    throw new Error(`The feed couldn't be fetched (HTTP ${res.status}).`);
+  }
   return res.text();
 }
 
@@ -527,16 +544,16 @@ function parseFeedXML(xml, feedUrl, feedId) {
     }
     return '';
   };
-  const seenGuids = new Set();
   const entries = atom ? [...root.children].filter((c) => c.localName === 'entry') : [...doc.getElementsByTagName('item')];
+  const guidCount = new Map();
+  for (const el of entries.slice(0, 60)) { const g = txt(el, 'guid', 'id'); if (g) guidCount.set(g, (guidCount.get(g) || 0) + 1); }
   const items = entries.slice(0, 60).map((el, idx) => {
     const html = htmlOf(el);
     const base = atom ? abs(el.getAttribute('xml:base'), feedBase) || feedBase : site || feedUrl;
-    const link = abs(linkOf(el), base);
+    const link = unwrapLink(abs(linkOf(el), base));
     let guid = txt(el, 'guid', 'id') || link || txt(el, 'title');
-    // Two items with the same id would collapse into one.
-    if (seenGuids.has(guid)) guid = `${guid}|${link || txt(el, 'title')}`;
-    seenGuids.add(guid);
+    // Items sharing an id would collapse into one: tell every copy apart by its link.
+    if (guidCount.get(guid) > 1) guid = `${guid}|${link || txt(el, 'title')}`;
     let d = Date.parse(txt(el, 'pubDate', 'published', 'updated', 'dc:date', 'date'));
     if (!Number.isFinite(d) || d > Date.now()) d = NaN;
     const media = [...el.getElementsByTagName('*')].find((c) => /^(thumbnail|content)$/.test(c.localName) && c.getAttribute('url') && /image|^$/.test(c.getAttribute('medium') || c.getAttribute('type') || ''));
@@ -566,6 +583,26 @@ function discoverFeed(html, pageUrl) {
   try { return new URL(link.getAttribute('href'), pageUrl).href; } catch { return ''; }
 }
 
+/** The search words of a Google News search feed (old Google Reader-era or current address), else ''. */
+function googleNewsQuery(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== 'news.google.com') return '';
+    return u.searchParams.get('q') || '';
+  } catch { return ''; }
+}
+/** News-search links go through a click-tracking redirect; use the article's own address. */
+function unwrapLink(link) {
+  try {
+    const u = new URL(link);
+    if (/(^|\.)bing\.com$/.test(u.hostname) && u.searchParams.get('url')) return safeUrl(u.searchParams.get('url')) || link;
+  } catch { /* not a URL */ }
+  return link;
+}
+
+/** Bing News has RSS for any search, and unlike Google it answers the relay. */
+const newsSearchUrl = (q) => `https://www.bing.com/news/search?q=${encodeURIComponent(q)}&format=rss`;
+
 /** The subscription with this address as it is now (another tab may have replaced the list). */
 const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
 
@@ -575,7 +612,18 @@ const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
  * unsubscribed while it was being fetched.
  */
 async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
-  xml ??= await fetchFeedText(feed.url, { feed });
+  let via = '';
+  if (xml == null) {
+    try {
+      xml = await fetchFeedText(feed.url, { feed });
+    } catch (e) {
+      // Google blocks relays: a Google News search comes from Bing News instead.
+      const q = googleNewsQuery(feed.url);
+      if (!q) throw e;
+      xml = await fetchFeedText(newsSearchUrl(q));
+      via = 'Bing News';
+    }
+  }
   const parsed = parseFeedXML(xml, feed.url, feed.id);
   if (!parsed) throw new Error('Not an RSS or Atom feed');
   const target = adding ? feed : liveSub(feed.url);
@@ -587,10 +635,18 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
     old.set(it.id, { ...prev, ...it, d: it.dated ? it.d : prev?.d ?? it.d });
   }
   S.ownItems[target.id] = [...old.values()].sort((a, b) => b.d - a.d).slice(0, OWN_ITEMS_PER_FEED);
+  // A feed that left the catalog: what came before isn't news to you.
+  if (target.convertedAt) {
+    for (const it of S.ownItems[target.id]) if (it.d < target.convertedAt && !isRead(it.id)) S.read[it.id] = Date.now();
+    store.set('read', S.read);
+    delete target.convertedAt;
+  }
   target.site = parsed.site || target.site;
   if (!target.titleSet && parsed.title) target.title = parsed.title;
   target.ok = Date.now();
   target.error = '';
+  delete target.failSince;
+  if (via) target.via = via; else delete target.via;
   if ('direct' in feed) target.direct = feed.direct;
   if (!adding) { saveOwnFeed(target.id); saveSubs(); }
   return parsed;
@@ -600,6 +656,8 @@ function noteFeedError(feed, e) {
   const target = liveSub(feed.url);
   if (!target) return;
   target.error = e.message || 'Could not fetch';
+  target.failSince ??= Date.now();
+  target.lastTry = Date.now();
   if ('direct' in feed) target.direct = feed.direct;
   saveSubs();
 }
@@ -630,12 +688,19 @@ let stopRefresh = false;
  * a time. Articles show up as each feed arrives. Only one open tab does
  * this at a time; the others get the results when it saves.
  */
-function refreshOwnFeeds({ force = false } = {}) {
+function refreshOwnFeeds({ force = false, wait = false } = {}) {
   // One run at a time; a request during a run runs again right after it.
-  if (ownRefreshing) return ownRefreshing.then(() => refreshOwnFeeds({ force }));
+  if (ownRefreshing) return ownRefreshing.then(() => refreshOwnFeeds({ force, wait }));
   const run = async () => {
     const catalog = catalogByUrl();
-    const due = (S.subs || []).filter((s) => s.own && !catalog.has(s.url) && (force || s.error || !s.ok || Date.now() - s.ok > OWN_REFRESH_MS));
+    const now = Date.now();
+    const due = (S.subs || []).filter((s) => {
+      if (!s.own || catalog.has(s.url)) return false;
+      if (force) return true;
+      // Failing for over 3 days: try once a day (saves the relay's daily allowance).
+      if (s.error && s.failSince && now - s.failSince > 3 * 864e5) return now - (s.lastTry || 0) > 864e5;
+      return s.error || !s.ok || now - s.ok > OWN_REFRESH_MS;
+    });
     if (!due.length || stopRefresh) return;
     S.ownProgress = { done: 0, total: due.length };
     renderSidebar();
@@ -666,7 +731,8 @@ function refreshOwnFeeds({ force = false } = {}) {
     paint(true);
   };
   ownRefreshing = (navigator.locks
-    ? navigator.locks.request('salareader-refresh', { ifAvailable: true }, (lock) => (lock ? run() : null))
+    // Background refreshes skip if another tab is fetching; an import waits its turn.
+    ? navigator.locks.request('salareader-refresh', wait ? {} : { ifAvailable: true }, (lock) => (lock ? run() : null))
     : run()
   ).finally(() => { ownRefreshing = null; });
   return ownRefreshing;
@@ -682,6 +748,21 @@ function subscribeCatalog(c, folder) {
 
 async function addFeed(url, folder) {
   url = url.trim();
+  // Words rather than an address: follow a news search for them.
+  if (/\s/.test(url) || !/^[^\s]+\.[a-z]{2,}([/:?#]|$)/i.test(url.replace(/^https?:\/\//i, ''))) {
+    const q = url;
+    const feedUrl = newsSearchUrl(q);
+    if (S.feeds.some((f) => f.url === feedUrl)) throw new Error("You're already following this search.");
+    $('#addStatus').textContent = `Searching the news for “${q}”…`;
+    const feed = { id: 'L' + hash(feedUrl), url: feedUrl, title: `“${q}” · News search`, titleSet: true, folder: folder.trim() || 'Searches', own: true, site: '' };
+    await fetchOwnFeed(feed, undefined, { adding: true });
+    S.subs ??= [];
+    S.subs.push(feed);
+    saveSubs();
+    saveOwnFeed(feed.id);
+    rebuild();
+    return feed;
+  }
   if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
   const status = $('#addStatus');
   const already = () => { throw new Error("You're already subscribed to this feed."); };
@@ -815,8 +896,14 @@ function topicMatches(topic) {
   return result;
 }
 
-/** Whole words only, so "AI" doesn't match "said" (letters and digits in any language). */
-const wordRe = (text) => new RegExp(`(?<![\\p{L}\\p{N}])${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu');
+/** Word matching for topics and search. */
+const wordRe = (text) => {
+  const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Words must start at a word edge ("AI" not in "said"; "agent" still finds "agents").
+  // Chinese, Japanese, Thai, Arabic… don't separate words with spaces: match anywhere.
+  const spaced = /^[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}\p{N}]/u.test(text);
+  return new RegExp(spaced ? `(?<![\\p{Script=Latin}\\p{Script=Cyrillic}\\p{Script=Greek}\\p{N}])${escaped}` : escaped, 'iu');
+};
 
 function computeTopic(topic) {
   const words = topic.query.trim().split(/\s+/).filter((w) => w.length > 2).map(wordRe);
@@ -1025,7 +1112,8 @@ function headerSub() {
   if (v.type === 'search') return v.status || `${all.length} results, best matches first`;
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);
-    if (f?.error) return `⚠ Couldn't fetch this feed last time: ${f.error}`;
+    if (f?.error) return `⚠ Couldn't fetch this feed${f.failSince ? ` (failing for ${agoText(f.failSince).replace(' ago', '')})` : ' last time'}: ${f.error}`;
+    if (f?.via) return `${unread} unread · Google blocks relays, so this search comes from ${f.via}.`;
   }
   return `${unread} unread${all.length !== unread ? ` of ${all.length}` : ''}`;
 }
@@ -1048,6 +1136,7 @@ function renderHeader() {
       <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
+      ${feed?.own && feed.error ? `<button data-act="retry">⟳ Try again</button>` : ''}
       ${feed ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
     </div>
     <div class="brief" id="brief" hidden></div>`;
@@ -1201,7 +1290,8 @@ function renderHome() {
       <h2 class="home-h">AI topics</h2>
       <p class="hint">Follow a subject across every feed. The AI matches articles by meaning, not just keywords.</p>
       <div class="chips">${S.topics.map((t) => `<a class="chip" href="#/topic/${t.id}">✨ ${esc(t.name)}${S.vectorsState !== 'loading' ? ` <b>${unreadOf(topicMatches(t).items)}</b>` : ''}</a>`).join('')}<button class="chip add" data-act="newtopic">＋ New topic</button></div>
-      ${broken.length ? `<h2 class="home-h">Needs attention</h2><ul class="broken">${broken.map((f) => `<li><a href="#/feed/${f.id}">${esc(f.title)}</a>: ${esc(f.error)}</li>`).join('')}</ul>` : ''}
+      ${broken.length ? `<h2 class="home-h">Needs attention</h2><ul class="broken">${broken.map((f) => `<li><a href="#/feed/${f.id}">${esc(f.title)}</a>${f.failSince ? ` <span class="muted">(failing for ${esc(agoText(f.failSince).replace(' ago', ''))})</span>` : ''}: ${esc(f.error)}</li>`).join('')}</ul>
+        ${broken.some((f) => f.own && f.failSince && Date.now() - f.failSince > 7 * 864e5) ? `<button data-act="unsubdead" class="ghost danger">Unsubscribe from feeds failing for over a week</button>` : ''}` : ''}
       ${store.get('deviceNoteDismissed', false) ? deviceNoteHTML(false) : ''}
     </section>`;
 }
@@ -1585,7 +1675,7 @@ async function importOPML(file) {
   const mins = Math.ceil(fresh.filter((f) => !catalog.has(f.url)).length / 55);
   toast(`Imported ${fresh.length} feed${fresh.length === 1 ? '' : 's'}${found.length > fresh.length ? ` (${found.length - fresh.length} you already had)` : ''}. Fetching them${mins > 1 ? `, about ${mins} minutes` : ''}; articles appear as they arrive.`, 6000);
   rebuild(); render();
-  await refreshOwnFeeds();
+  await refreshOwnFeeds({ wait: true });
   rebuild(); render();
   const blocked = S.feeds.filter((f) => f.own && f.error).length;
   if (blocked && !relayUrl()) toast(`${blocked} feed${blocked === 1 ? '' : 's'} need a relay to be read. See ⚙ Settings → Your feeds.`, 6000);
@@ -1673,6 +1763,22 @@ function wire() {
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
         case 'refresh': refresh(); return;
+        case 'retry': {
+          const sub = liveSub(S.feedById.get(S.view.id)?.url);
+          if (!sub) return;
+          btn.disabled = true;
+          btn.textContent = 'Trying…';
+          fetchOwnFeed({ ...sub }).catch((err) => noteFeedError(sub, err)).finally(() => { rebuild(); render(); toast(sub.error ? sub.error : `✓ ${sub.title} works again`, 4000); });
+          return;
+        }
+        case 'unsubdead': {
+          const dead = S.feeds.filter((f) => f.own && f.error && f.failSince && Date.now() - f.failSince > 7 * 864e5);
+          if (!dead.length || !confirm(`Unsubscribe from ${dead.length} feed${dead.length === 1 ? '' : 's'} that ha${dead.length === 1 ? 's' : 've'} failed for over a week?\n\n${dead.map((f) => f.title).join('\n')}`)) return;
+          for (const f of dead) unsubscribe(f.id);
+          render();
+          toast(`Unsubscribed from ${dead.length} broken feed${dead.length === 1 ? '' : 's'}`);
+          return;
+        }
         case 'shownew': render(); window.scrollTo(0, 0); return;
         case 'switchai': openSettings(); return;
         case 'backup': openSettings(); $('#exportBackup').scrollIntoView({ block: 'center' }); $('#exportBackup').focus(); return;
@@ -1695,6 +1801,10 @@ function wire() {
       else toggleEntry(article);
     }
   });
+
+  // Clicking a title opens the article without keeping focus on it, so Space
+  // still scrolls (Tab still reaches the titles).
+  document.addEventListener('mousedown', (e) => { if (e.target.closest?.('button.line')) e.preventDefault(); });
 
   // Close/Cancel buttons (not submit buttons, so Enter in a field submits the form)
   document.addEventListener('click', (e) => { const c = e.target.closest('[data-close]'); if (c) c.closest('dialog')?.close(); });
@@ -1805,7 +1915,7 @@ function wire() {
     await eraseEverything();
     location.reload();
   });
-  $('#resetRead').addEventListener('click', () => { if (confirm('Mark every article as unread?')) { S.read = {}; store.set('read', S.read); render(); } });
+  $('#resetRead').addEventListener('click', () => { if (confirm('Mark every article as unread?')) { S.read = {}; store.set('read', S.read); S.unread = unreadOf(S.items); render(); } });
 
   // Keyboard
   let gPending = false;
