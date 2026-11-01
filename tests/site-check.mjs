@@ -145,6 +145,9 @@ await step('old Google News search address works (via Bing News)', async () => {
   await page.waitForSelector('#viewHeader .sub');
   const sub = await page.$eval('#viewHeader .sub', (e) => e.textContent);
   if (/Couldn't/.test(sub)) throw new Error(sub);
+  const dbg = await page.evaluate(() => new Promise((res) => { const r = indexedDB.open('salareader'); r.onsuccess = () => { const tx = r.result.transaction('kv'); const q1 = tx.objectStore('kv').get('read'); const q2 = tx.objectStore('kv').get('subs'); tx.oncomplete = () => res({ read: Object.keys(q1.result || {}), subs: (q2.result || []).filter((x) => x.own).map((x) => ({ id: x.id, url: x.url.slice(0, 70), via: x.via })) }); }; }));
+  const rows = await page.$$eval('article.entry', (l) => l.map((a) => ({ id: a.dataset.id, read: a.classList.contains('read'), t: a.querySelector('.t')?.textContent.slice(0, 40) })));
+  info('read-state debug', JSON.stringify({ ...dbg, rows: rows.filter((r) => r.read || dbg.read.includes(r.id)) }));
   return sub;
 });
 

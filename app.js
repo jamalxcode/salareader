@@ -621,23 +621,33 @@ const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
  * the feed isn't in your list yet; otherwise nothing is written if you
  * unsubscribed while it was being fetched.
  */
+/** News searches sometimes get a non-feed answer for a moment: one retry. */
+async function fetchFeedTextRetry(url, opts) {
+  const text = await fetchFeedText(url, opts);
+  if (parseFeedXML(text, url, 'x') || !/bing\.com\/news/.test(url)) return text;
+  await sleep(2500);
+  const again = await fetchFeedText(url, opts);
+  if (parseFeedXML(again, url, 'x')) return again;
+  throw new Error("The news search didn't answer with results just now. It will be tried again.");
+}
+
 async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   let via = '';
   const q = googleNewsQuery(feed.url);
   if (xml == null) {
     try {
-      xml = await fetchFeedText(feed.url, { feed });
+      xml = await fetchFeedTextRetry(feed.url, { feed });
     } catch (e) {
       // Google blocks relays: a Google News search comes from Bing News instead.
       if (!q) throw e;
-      xml = await fetchFeedText(newsSearchUrl(q));
+      xml = await fetchFeedTextRetry(newsSearchUrl(q));
       via = 'Bing News';
     }
   }
   let parsed = parseFeedXML(xml, feed.url, feed.id);
   // Google sometimes answers with an empty list (or a page that isn't a feed): ask Bing too.
   if (q && !via && (!parsed || !parsed.items.length)) {
-    const bing = parseFeedXML(await fetchFeedText(newsSearchUrl(q)), feed.url, feed.id);
+    const bing = parseFeedXML(await fetchFeedTextRetry(newsSearchUrl(q)), feed.url, feed.id);
     if (bing?.items.length) { parsed = { ...bing, title: parsed?.title || bing.title }; via = 'Bing News'; }
   }
   if (!parsed) throw new Error('Not an RSS or Atom feed');
