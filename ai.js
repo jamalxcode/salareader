@@ -23,6 +23,15 @@ export function decodeVector(b64) {
   return v;
 }
 
+/** The reverse of decodeVector: int8, base64 (about 512 characters for 384 numbers). */
+export function encodeVector(v) {
+  const q = new Int8Array(v.length);
+  for (let i = 0; i < v.length; i++) q[i] = Math.max(-127, Math.min(127, Math.round(v[i] * 127)));
+  let bin = '';
+  for (let i = 0; i < q.length; i++) bin += String.fromCharCode(q[i] & 255);
+  return btoa(bin);
+}
+
 export function dot(a, b) {
   let s = 0;
   for (let i = 0; i < a.length; i++) s += a[i] * b[i];

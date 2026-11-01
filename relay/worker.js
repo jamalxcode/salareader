@@ -39,6 +39,25 @@ const FEED_START = /^(?:﻿)?\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<\?x
 const isFeed = (text) => FEED_START.test(text.slice(0, 4000));
 const isHtml = (text) => /<html[\s>]|<!doctype html/i.test(text.slice(0, 4000));
 
+/** Decodes feed bytes using the charset in Content-Type or the XML declaration (UTF-8 if neither). */
+function decodeFeed(buf, contentType = '') {
+  const bytes = new Uint8Array(buf);
+  let charset = /charset=["']?([\w-]+)/i.exec(contentType)?.[1];
+  if (!charset) {
+    const head = new TextDecoder('latin1').decode(bytes.subarray(0, 300));
+    charset = /^\s*(?:﻿|ï»¿)?<\?xml[^>]*encoding=["']([\w-]+)["']/i.exec(head)?.[1];
+  }
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) charset = 'utf-8';
+  try { return new TextDecoder(charset || 'utf-8').decode(bytes); } catch { return new TextDecoder('utf-8').decode(bytes); }
+}
+
+/** http(s) on a normal port, and not a private or local address. */
+function isPublic(u) {
+  return /^https?:$/.test(u.protocol) && (!u.port || ['80', '443'].includes(u.port)) && u.hostname.includes('.')
+    && !/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|\[)/i.test(u.hostname)
+    && !/\.(local|internal|localhost)$/i.test(u.hostname);
+}
+
 /** The RSS/Atom links a web page advertises, as absolute URLs. */
 function feedLinks(html, base) {
   const out = [];
@@ -80,39 +99,44 @@ export default {
 
     let target;
     try { target = new URL(new URL(request.url).searchParams.get('url') || ''); } catch { return reply(400, 'Add ?url=<feed address>.'); }
-    if (!/^https?:$/.test(target.protocol) || target.port && !['80', '443'].includes(target.port)
-      || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|\[)/i.test(target.hostname) || !target.hostname.includes('.')) {
-      return reply(400, 'Only public http(s) addresses.');
-    }
 
+    // Follow redirects one at a time, checking every address on the way.
     let res;
-    try {
-      res = await fetch(target, {
-        redirect: 'follow',
-        // Shared 10-minute cache for everyone reading this feed.
-        cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
-        headers: {
-          // Only a generic agent: nothing about the person reading is passed on.
-          'User-Agent': 'SalaReader/1.0 (+https://reader.sala.company)',
-          Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.5',
-        },
-      });
-    } catch {
-      return reply(502, "Couldn't reach that site.");
+    for (let hop = 0; ; hop++) {
+      if (!isPublic(target)) return reply(400, 'Only public http(s) addresses.');
+      try {
+        res = await fetch(target, {
+          redirect: 'manual',
+          // Shared 10-minute cache for everyone reading this feed.
+          cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
+          headers: {
+            // Only a generic agent: nothing about the person reading is passed on.
+            'User-Agent': 'SalaReader/1.0 (+https://reader.sala.company)',
+            Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.5',
+          },
+        });
+      } catch {
+        return reply(502, "Couldn't reach that site.");
+      }
+      const location = res.headers.get('Location');
+      if (res.status < 300 || res.status >= 400 || !location) break;
+      if (hop >= 5) return reply(502, 'Too many redirects.');
+      try { target = new URL(location, target); } catch { return reply(502, 'Bad redirect.'); }
     }
     if (!res.ok) return reply(res.status === 404 ? 404 : 502, `The site answered HTTP ${res.status}.`);
     const len = Number(res.headers.get('Content-Length') || 0);
     if (len > MAX_BYTES) return reply(413, 'Too big for a feed.');
     const buf = await res.arrayBuffer();
     if (buf.byteLength > MAX_BYTES) return reply(413, 'Too big for a feed.');
-    const text = new TextDecoder().decode(buf);
+    // Re-encoded as UTF-8 (the reply says so), whatever the feed's own charset.
+    const text = decodeFeed(buf, res.headers.get('Content-Type') || '');
 
     if (isFeed(text)) {
       return reply(200, text, { 'Content-Type': 'application/xml; charset=utf-8', 'X-Relay-Kind': 'feed' });
     }
     if (isHtml(text)) {
       // A web page: only say which feeds it links to.
-      return reply(200, JSON.stringify({ feeds: feedLinks(text, res.url || target.href) }), { 'Content-Type': 'application/json', 'X-Relay-Kind': 'links' });
+      return reply(200, JSON.stringify({ feeds: feedLinks(text, target.href) }), { 'Content-Type': 'application/json', 'X-Relay-Kind': 'links' });
     }
     return reply(415, "That address isn't a feed.");
   },

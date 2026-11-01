@@ -8,7 +8,7 @@
 // site or through your own relay (relay/worker.js). Backup → export/import
 // moves everything to another device.
 
-import { decodeVector, dot, embed, embedText, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
+import { decodeVector, encodeVector, dot, embed, embedText, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const PAGE = 60;
 const OWN_ITEMS_PER_FEED = 80;
@@ -66,6 +66,11 @@ async function loadStore() {
   navigator.storage?.persist?.().catch(() => {});
 }
 
+// Other open tabs of the reader hear about every save and reload those keys.
+const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('salareader') : null;
+let frozen = false;      // set while erasing or importing, so nothing writes old data back
+let warnedSaveFail = false;
+
 async function flush() {
   clearTimeout(flushTimer);
   if (!dirty.size) return;
@@ -73,8 +78,9 @@ async function flush() {
   dirty.clear();
   if (useLocalStorage) {
     for (const k of keys) {
-      try { if (cache.has(k)) localStorage.setItem('sr.' + k, JSON.stringify(cache.get(k))); else localStorage.removeItem('sr.' + k); } catch { /* full */ }
+      try { if (cache.has(k)) localStorage.setItem('sr.' + k, JSON.stringify(cache.get(k))); else localStorage.removeItem('sr.' + k); } catch { saveFailed(); }
     }
+    channel?.postMessage({ keys });
     return;
   }
   try {
@@ -85,21 +91,48 @@ async function flush() {
       for (const k of keys) { if (cache.has(k)) os.put(cache.get(k), k); else os.delete(k); }
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('aborted'));
     });
+    channel?.postMessage({ keys });
   } catch (e) {
     console.warn('Saving failed', e);
-    keys.forEach((k) => dirty.add(k));
+    keys.forEach((k) => { if (!dirty.has(k)) dirty.add(k); });
+    saveFailed();
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flush, 30_000); // try again later
   }
 }
+function saveFailed() {
+  if (warnedSaveFail) return;
+  warnedSaveFail = true;
+  toast("⚠ Couldn't save on this device. Storage may be full. Unsubscribing from some feeds or clearing space helps.", 8000);
+}
 function scheduleFlush() { clearTimeout(flushTimer); flushTimer = setTimeout(flush, 300); }
+
+/** Another tab saved these keys: reload them, unless this tab has unsaved changes to them. */
+async function reloadKeys(keys) {
+  if (frozen || useLocalStorage) return;
+  const db = await openDB();
+  await new Promise((resolve) => {
+    const tx = db.transaction(KV, 'readonly');
+    const os = tx.objectStore(KV);
+    for (const k of keys) {
+      if (dirty.has(k)) continue;
+      const req = os.get(k);
+      req.onsuccess = () => { if (req.result === undefined) cache.delete(k); else cache.set(k, req.result); };
+    }
+    tx.oncomplete = resolve;
+    tx.onerror = resolve;
+  });
+}
 addEventListener('pagehide', flush);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
 const store = {
   // structuredClone keeps the stored copy separate from objects the app keeps changing.
   get(key, fallback) { return cache.has(key) ? structuredClone(cache.get(key)) : fallback; },
-  set(key, value) { cache.set(key, structuredClone(value)); dirty.add(key); scheduleFlush(); },
-  del(key) { cache.delete(key); dirty.add(key); scheduleFlush(); },
+  set(key, value) { if (frozen) return; cache.set(key, structuredClone(value)); dirty.add(key); scheduleFlush(); },
+  del(key) { if (frozen) return; cache.delete(key); dirty.add(key); scheduleFlush(); },
   keys() { return [...cache.keys()]; },
 };
 
@@ -117,7 +150,7 @@ const S = {
   vectors: new Map(),   // itemId -> Float32Array
   vectorsState: 'none', // none | loading | ready | missing
   subs: null,           // [{id, url, title, folder, own?, site?, error?, ok?}] (null until first run)
-  ownItems: {},         // feedId -> items[] for feeds this page fetches itself
+  ownItems: {},         // feedId -> items[] for feeds this page fetches itself (stored as own:<feedId>)
   read: {},             // id -> time read
   starred: {},          // id -> item copy (survives feed cleanup)
   topics: [],           // {id, name, query, qv: number[]}
@@ -129,11 +162,19 @@ const S = {
   shown: 0,
   cur: -1,
   scores: null,         // id -> score (search / topic views)
+  version: 0,           // bumped whenever items or vectors change (topic results are cached per version)
 };
 
 function loadState() {
   S.subs = store.get('subs', null);
-  S.ownItems = store.get('ownItems', {});
+  S.ownItems = {};
+  for (const k of store.keys()) if (k.startsWith('own:')) S.ownItems[k.slice(4)] = store.get(k, []);
+  // Earlier versions kept every feed's articles in one record.
+  const allOwn = store.get('ownItems', null);
+  if (allOwn) {
+    for (const [id, items] of Object.entries(allOwn)) if (!S.ownItems[id]) { S.ownItems[id] = items; store.set('own:' + id, items); }
+    store.del('ownItems');
+  }
   S.read = store.get('read', {});
   S.starred = store.get('starred', {});
   S.topics = store.get('topics', []);
@@ -154,18 +195,25 @@ function loadState() {
     else { S.settings.relayMode = 'shared'; S.settings.relay = ''; S.settings.relayToken = ''; }
     saveSettings();
   }
-  // Earlier versions kept browser-added feeds separately.
+  // Earlier versions kept browser-added feeds separately. Keep them until
+  // they're safely in the subscription list.
   const oldFeeds = store.get('localFeeds', null);
   if (oldFeeds) {
-    S.subs = S.subs || null;
-    S.pendingOwn = oldFeeds.map((f) => ({ id: f.id, url: f.url, title: f.title, folder: f.folder || '', own: true, site: f.site || '' }));
-    S.ownItems = { ...store.get('localItems', {}), ...S.ownItems };
-    store.del('localFeeds'); store.del('localItems');
+    const moved = oldFeeds.map((f) => ({ id: f.id, url: f.url, title: f.title, folder: f.folder || '', own: true, site: f.site || '' }));
+    for (const [id, items] of Object.entries(store.get('localItems', {}))) if (!S.ownItems[id]) { S.ownItems[id] = items; store.set('own:' + id, items); }
+    store.del('localItems');
+    if (S.subs) {
+      for (const f of moved) if (!S.subs.some((s) => s.url === f.url)) S.subs.push(f);
+      saveSubs();
+      store.del('localFeeds');
+    } else {
+      S.pendingOwn = moved; // added to the list when it's first made (loadIndex)
+    }
   }
 }
 const saveSettings = () => store.set('settings', S.settings);
 const saveSubs = () => store.set('subs', S.subs);
-const saveOwnItems = () => store.set('ownItems', S.ownItems);
+const saveOwnFeed = (id) => { if (S.ownItems[id]) store.set('own:' + id, S.ownItems[id]); else store.del('own:' + id); };
 const ai = () => {
   const p = provider(S.settings.aiProvider);
   return { p, key: S.settings.keys[p.id] || '', model: S.settings.models[p.id] || 'auto' };
@@ -185,6 +233,8 @@ function avatar(f, big = false) {
   const hue = parseInt(hash(f?.url || name).slice(0, 4), 16) % 360;
   return `<span class="fav av${big ? ' big' : ''}" style="--h:${hue}" aria-hidden="true">${esc(letter)}</span>`;
 }
+/** Only web links: a feed's javascript: or data: "link" would otherwise run code here. */
+const safeUrl = (u, base) => { try { const x = new URL(u, base); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } };
 const isRead = (id) => id in S.read;
 const strip = (html) => { const d = document.createElement('div'); d.innerHTML = DOMPurifySafe(html); return (d.textContent || '').replace(/\s+/g, ' ').trim(); };
 function DOMPurifySafe(html) { return window.DOMPurify ? window.DOMPurify.sanitize(html) : String(html).replace(/<[^>]+>/g, ' '); }
@@ -225,6 +275,7 @@ async function loadIndex(bust) {
     S.subs = S.index.feeds.map((f) => ({ id: f.id, url: f.url, title: f.title, folder: f.folder || '' }));
     if (S.pendingOwn) S.subs.push(...S.pendingOwn.filter((o) => !S.subs.some((s) => s.url === o.url)));
     saveSubs();
+    if (S.pendingOwn) { store.del('localFeeds'); S.pendingOwn = null; }
   }
   rebuild();
 }
@@ -248,6 +299,7 @@ function rebuild() {
   let changed = false;
   for (const [id, t] of Object.entries(S.read)) if (t < cutoff && !S.byId.has(id)) { delete S.read[id]; changed = true; }
   if (changed) store.set('read', S.read);
+  S.version++;
 }
 
 async function feedContent(feedId) {
@@ -263,14 +315,20 @@ async function loadVectors() {
   S.vectorsState = 'loading';
   S.vectorsPromise = (async () => {
     try {
+      // Vectors for your own feeds' articles, worked out earlier on this device.
+      for (const k of store.keys()) {
+        if (!k.startsWith('vec:')) continue;
+        for (const [id, b64] of Object.entries(store.get(k, {}))) S.vectors.set(id, decodeVector(b64));
+      }
       const res = await fetch(`data/vectors.json?u=${S.index.updated}`);
       if (!res.ok) throw new Error(res.status);
       const data = await res.json();
       for (const [id, b64] of Object.entries(data.v || {})) S.vectors.set(id, decodeVector(b64));
       S.vectorsState = S.vectors.size ? 'ready' : 'missing';
     } catch {
-      S.vectorsState = 'missing';
+      S.vectorsState = S.vectors.size ? 'ready' : 'missing';
     }
+    S.version++;
   })();
   return S.vectorsPromise;
 }
@@ -282,6 +340,13 @@ async function ensureVectors(items, onProgress) {
   if (!todo.length) return;
   const vecs = await embed(todo.map(embedText), onProgress);
   todo.forEach((it, k) => S.vectors.set(it.id, vecs[k]));
+  S.version++;
+  // Keep your own feeds' vectors on the device, one record per feed, so they're worked out only once.
+  for (const fid of new Set(todo.filter((i) => S.feedById.get(i.f)?.own).map((i) => i.f))) {
+    const rec = {};
+    for (const it of S.ownItems[fid] || []) { const v = S.vectors.get(it.id); if (v) rec[it.id] = encodeVector(v); }
+    store.set('vec:' + fid, rec);
+  }
 }
 
 // ---------- your own feeds (fetched by this page) ----------
@@ -299,6 +364,18 @@ function relayUrl() {
  * Fetches a feed straight from its site, or through the relay. Never a public proxy.
  * For a web page, the relay answers with just the feed links on it (JSON).
  */
+/** Decodes feed bytes using the charset in Content-Type or the XML declaration (UTF-8 if neither). */
+function decodeFeed(buf, contentType = '') {
+  const bytes = new Uint8Array(buf);
+  let charset = /charset=["']?([\w-]+)/i.exec(contentType)?.[1];
+  if (!charset) {
+    const head = new TextDecoder('latin1').decode(bytes.subarray(0, 300));
+    charset = /^\s*(?:﻿|ï»¿)?<\?xml[^>]*encoding=["']([\w-]+)["']/i.exec(head)?.[1];
+  }
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) charset = 'utf-8';
+  try { return new TextDecoder(charset || 'utf-8').decode(bytes); } catch { return new TextDecoder('utf-8').decode(bytes); }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The relay allows 60 requests a minute per person, so requests to it are
@@ -321,7 +398,7 @@ async function fetchFeedText(url, { relayOnly = false, feed = null } = {}) {
   if (!relayOnly && feed?.direct !== false) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(15000), credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
-      if (res.ok) { if (feed) feed.direct = true; return await res.text(); }
+      if (res.ok) { if (feed) feed.direct = true; return decodeFeed(await res.arrayBuffer(), res.headers.get('content-type') || ''); }
     } catch { /* the site doesn't let web pages read it: use the relay */ }
     if (feed) feed.direct = false;
   }
@@ -389,7 +466,7 @@ function parseFeedXML(xml, feedUrl, feedId) {
     const alt = links.find((l) => (l.getAttribute('rel') || 'alternate') === 'alternate') || links[0];
     return alt?.getAttribute('href') || '';
   };
-  const abs = (u, base) => { try { return new URL(u, base).href; } catch { return u; } };
+  const abs = (u, base) => safeUrl(u, base);
   const site = abs(linkOf(channel), feedUrl);
   const entries = atom ? [...root.children].filter((c) => c.localName === 'entry') : [...doc.getElementsByTagName('item')];
   const items = entries.slice(0, 60).map((el, idx) => {
@@ -425,47 +502,67 @@ function discoverFeed(html, pageUrl) {
   try { return new URL(link.getAttribute('href'), pageUrl).href; } catch { return ''; }
 }
 
-async function fetchOwnFeed(feed, xml) {
+/** The subscription with this address as it is now (another tab may have replaced the list). */
+const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
+
+/**
+ * Fetches one of your own feeds and merges its new articles. With adding,
+ * the feed isn't in your list yet; otherwise nothing is written if you
+ * unsubscribed while it was being fetched.
+ */
+async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   xml ??= await fetchFeedText(feed.url, { feed });
   const parsed = parseFeedXML(xml, feed.url, feed.id);
   if (!parsed) throw new Error('Not an RSS or Atom feed');
-  const old = new Map((S.ownItems[feed.id] || []).map((i) => [i.id, i]));
+  const target = adding ? feed : liveSub(feed.url);
+  if (!target) return parsed;
+  const old = new Map((S.ownItems[target.id] || []).map((i) => [i.id, i]));
   for (const it of parsed.items) {
     const prev = old.get(it.id);
     // Undated items keep the time we first saw them.
     old.set(it.id, { ...prev, ...it, d: it.dated ? it.d : prev?.d ?? it.d });
   }
-  S.ownItems[feed.id] = [...old.values()].sort((a, b) => b.d - a.d).slice(0, OWN_ITEMS_PER_FEED);
-  feed.site = parsed.site || feed.site;
-  if (!feed.titleSet && parsed.title) feed.title = parsed.title;
-  feed.ok = Date.now();
-  feed.error = '';
+  S.ownItems[target.id] = [...old.values()].sort((a, b) => b.d - a.d).slice(0, OWN_ITEMS_PER_FEED);
+  target.site = parsed.site || target.site;
+  if (!target.titleSet && parsed.title) target.title = parsed.title;
+  target.ok = Date.now();
+  target.error = '';
+  if ('direct' in feed) target.direct = feed.direct;
+  if (!adding) saveOwnFeed(target.id);
   return parsed;
+}
+
+function noteFeedError(feed, e) {
+  const target = liveSub(feed.url);
+  if (!target) return;
+  target.error = e.message || 'Could not fetch';
+  if ('direct' in feed) target.direct = feed.direct;
 }
 
 const OWN_REFRESH_MS = 25 * 60 * 1000;
 let ownRefreshing = null;
+let stopRefresh = false;
 
 /**
  * Fetches your own feeds that are due (or all of them with force), a few at
- * a time. Articles show up as each feed arrives.
+ * a time. Articles show up as each feed arrives. Only one open tab does
+ * this at a time; the others get the results when it saves.
  */
 function refreshOwnFeeds({ force = false } = {}) {
   // One run at a time; a request during a run runs again right after it.
   if (ownRefreshing) return ownRefreshing.then(() => refreshOwnFeeds({ force }));
-  ownRefreshing = (async () => {
+  const run = async () => {
     const catalog = catalogByUrl();
     const due = (S.subs || []).filter((s) => !catalog.has(s.url) && (force || s.error || !s.ok || Date.now() - s.ok > OWN_REFRESH_MS));
-    if (!due.length) return;
+    if (!due.length || stopRefresh) return;
     S.ownProgress = { done: 0, total: due.length };
     renderSidebar();
     let lastPaint = 0;
     const paint = (final) => {
-      if (!final && Date.now() - lastPaint < 1500) return;
+      if (stopRefresh || (!final && Date.now() - lastPaint < 1500)) return;
       lastPaint = Date.now();
       rebuild();
       saveSubs();
-      saveOwnItems();
       renderSidebar();
       // Fill an empty screen straight away; otherwise just update counts.
       if (final || S.view.type === 'home' || !document.querySelector('#list article.entry')) render();
@@ -473,16 +570,20 @@ function refreshOwnFeeds({ force = false } = {}) {
     };
     let next = 0;
     await Promise.all(Array.from({ length: 4 }, async () => {
-      while (next < due.length) {
+      while (next < due.length && !stopRefresh) {
         const f = due[next++];
-        try { await fetchOwnFeed(f); } catch (e) { f.error = e.message || 'Could not fetch'; }
-        S.ownProgress.done++;
+        try { await fetchOwnFeed(f); } catch (e) { noteFeedError(f, e); }
+        if (S.ownProgress) S.ownProgress.done++;
         paint(false);
       }
     }));
     S.ownProgress = null;
     paint(true);
-  })().finally(() => { ownRefreshing = null; });
+  };
+  ownRefreshing = (navigator.locks
+    ? navigator.locks.request('salareader-refresh', { ifAvailable: true }, (lock) => (lock ? run() : null))
+    : run()
+  ).finally(() => { ownRefreshing = null; });
   return ownRefreshing;
 }
 
@@ -516,11 +617,11 @@ async function addFeed(url, folder) {
     text = await fetchFeedText(feedUrl);
   }
   const feed = { id: 'L' + hash(feedUrl), url: feedUrl, title: host(feedUrl), folder: folder.trim(), own: true, site: '' };
-  await fetchOwnFeed(feed, text);
+  await fetchOwnFeed(feed, text, { adding: true });
   S.subs ??= [];
   S.subs.push(feed);
   saveSubs();
-  saveOwnItems();
+  saveOwnFeed(feed.id);
   rebuild();
   return feed;
 }
@@ -531,7 +632,8 @@ function unsubscribe(id) {
   S.subs = S.subs.filter((s) => s.url !== f.url);
   delete S.ownItems[id];
   saveSubs();
-  saveOwnItems();
+  saveOwnFeed(id);
+  store.del('vec:' + id);
   rebuild();
 }
 
@@ -605,7 +707,19 @@ const totalUnread = () => unreadOf(S.items);
 
 // ---------- topics ----------
 
+const topicCache = new Map();
+
+/** Articles matching a topic. Cached until items, vectors or the threshold change. */
 function topicMatches(topic) {
+  const key = `${S.version}|${S.settings.threshold}|${topic.query}`;
+  const hit = topicCache.get(topic.id);
+  if (hit?.key === key) return hit.result;
+  const result = computeTopic(topic);
+  topicCache.set(topic.id, { key, result });
+  return result;
+}
+
+function computeTopic(topic) {
   const words = topic.query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
   const phrase = topic.query.toLowerCase();
   const qv = topic.qv ? Float32Array.from(topic.qv) : null;
@@ -857,13 +971,13 @@ function bodyHTML(it) {
   const f = S.feedById.get(it.f);
   const star = !!S.starred[it.id];
   return `
-    <h2><a href="${esc(it.l)}" target="_blank" rel="noopener">${esc(it.t)} <span class="ext">↗</span></a></h2>
+    <h2><a href="${esc(safeUrl(it.l) || '#')}" target="_blank" rel="noopener noreferrer">${esc(it.t)} <span class="ext">↗</span></a></h2>
     <p class="meta">from <a href="#/feed/${esc(it.f)}">${esc(f?.title || 'a feed')}</a>${it.a ? ` by ${esc(it.a)}` : ''} · ${esc(new Date(it.d).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }))}</p>
     <div class="content" data-content><p class="loading">${esc(it.s || '')}</p></div>
     <div class="actions">
       <button data-act="star" class="${star ? 'on' : ''}">${star ? '★ Starred' : '☆ Star'}</button>
       <button data-act="unread">${isRead(it.id) ? '◌ Keep unread' : '● Mark read'}</button>
-      <a class="button" href="${esc(it.l)}" target="_blank" rel="noopener">Open original ↗</a>
+      <a class="button" href="${esc(safeUrl(it.l) || '#')}" target="_blank" rel="noopener noreferrer">Open original ↗</a>
       <button data-act="summarize" class="ai">✨ Summarize</button>
       <button data-act="related">🔗 More like this</button>
       <button data-act="share">Share</button>
@@ -878,9 +992,9 @@ async function fillContent(article) {
   if (!it || !box || box.dataset.filled) return;
   box.dataset.filled = '1';
   const html = it.c ?? (await feedContent(it.f))[it.id];
-  if (!html) { box.innerHTML = `<p>${esc(it.s || '')}</p>${it.i ? `<img src="${esc(it.i)}" alt="" loading="lazy">` : ''}`; return; }
-  box.innerHTML = sanitize(html, it.l);
-  if (it.i && !box.querySelector('img')) box.insertAdjacentHTML('afterbegin', `<img class="lead" src="${esc(it.i)}" alt="" loading="lazy">`);
+  if (!html) { box.innerHTML = `<p>${esc(it.s || '')}</p>${safeUrl(it.i) ? `<img src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}`; return; }
+  box.innerHTML = sanitize(html, safeUrl(it.l) || location.href);
+  if (safeUrl(it.i) && !box.querySelector('img')) box.insertAdjacentHTML('afterbegin', `<img class="lead" src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer">`);
 }
 
 function sanitize(html, base) {
@@ -974,7 +1088,7 @@ function renderHome() {
       </div>
       ${fresh.length ? `<h2 class="home-h">Fresh picks</h2><div class="cards">${fresh.map((it) => {
         const f = S.feedById.get(it.f);
-        return `<a class="card" href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><img src="${esc(it.i)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span class="card-src">${esc(f?.title || '')} · ${ago(it.d)}</span><span class="card-t">${esc(it.t)}</span></a>`;
+        return `<a class="card" href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><img src="${esc(safeUrl(it.i))}" alt=""" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span class="card-src">${esc(f?.title || '')} · ${ago(it.d)}</span><span class="card-t">${esc(it.t)}</span></a>`;
       }).join('')}</div>` : ''}
       ${latest.length ? `<h2 class="home-h">Latest</h2><div class="mini-list">${latest.map((it) => `<a href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><span class="src">${esc(S.feedById.get(it.f)?.title || '')}</span><span class="t">${esc(it.t)}</span><time>${ago(it.d)}</time></a>`).join('')}</div>` : ''}
       <h2 class="home-h">AI topics</h2>
@@ -1187,8 +1301,10 @@ async function related(article) {
 async function share(article) {
   const it = S.byId.get(article.dataset.id) || S.starred[article.dataset.id];
   try {
-    if (navigator.share) { await navigator.share({ title: it.t, url: it.l }); return; }
-    await navigator.clipboard.writeText(it.l);
+    const url = safeUrl(it.l);
+    if (!url) return;
+    if (navigator.share) { await navigator.share({ title: it.t, url }); return; }
+    await navigator.clipboard.writeText(url);
     toast('Link copied');
   } catch { /* cancelled */ }
 }
@@ -1282,37 +1398,52 @@ function exportOPML() {
 
 // ---------- backup: move everything to another device ----------
 
-const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'collapsed', 'days', 'settings', 'ownItems'];
+const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'collapsed', 'days', 'settings'];
+const isPerFeedKey = (k) => k.startsWith('own:') || k.startsWith('vec:');
 
 async function exportBackup(includeKeys) {
   await flush();
   const data = {};
   for (const k of BACKUP_KEYS) if (store.get(k) !== undefined) data[k] = store.get(k);
+  data.ownItems = {};
+  for (const k of store.keys()) if (k.startsWith('own:')) data.ownItems[k.slice(4)] = store.get(k);
   if (data.settings && !includeKeys) { data.settings = { ...data.settings, keys: {}, relayToken: '' }; }
   const backup = { app: 'salareader', version: 1, exported: new Date().toISOString(), includesKeys: !!includeKeys, data };
   download(`salareader-backup-${today()}.json`, JSON.stringify(backup), 'application/json');
   toast(includeKeys ? 'Backup saved, including your API keys: keep the file private' : 'Backup saved (API keys left out)', 4000);
 }
 
+const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+
 async function importBackup(file) {
   let backup;
   try { backup = JSON.parse(await file.text()); } catch { throw new Error("That file isn't a Sala Reader backup."); }
-  if (backup?.app !== 'salareader' || typeof backup.data !== 'object') throw new Error("That file isn't a Sala Reader backup.");
-  const n = backup.data.subs?.length ?? 0;
+  const d = backup?.data;
+  const bad = backup?.app !== 'salareader' || !isObj(d)
+    || ('subs' in d && !Array.isArray(d.subs)) || ['read', 'starred', 'collapsed', 'settings', 'ownItems'].some((k) => k in d && !isObj(d[k]))
+    || ['topics', 'days'].some((k) => k in d && !Array.isArray(d[k]))
+    || (d.subs || []).some((s) => !isObj(s) || typeof s.url !== 'string' || typeof s.id !== 'string');
+  if (bad) throw new Error("That file isn't a Sala Reader backup, or it's damaged.");
+  const n = d.subs?.length ?? 0;
   if (!confirm(`Replace everything on this device with the backup from ${new Date(backup.exported).toLocaleString()} (${n} subscription${n === 1 ? '' : 's'})?`)) return false;
   const keepKeys = S.settings.keys;
   const keepRelayToken = S.settings.relayToken;
-  for (const k of BACKUP_KEYS) store.del(k);
-  for (const k of BACKUP_KEYS) if (k in backup.data) store.set(k, backup.data[k]);
+  stopRefresh = true; // a feed refresh still running must not write old data back
+  for (const k of store.keys()) if (BACKUP_KEYS.includes(k) || isPerFeedKey(k)) store.del(k);
+  for (const k of BACKUP_KEYS) if (k in d) store.set(k, d[k]);
+  for (const [id, items] of Object.entries(d.ownItems || {})) if (Array.isArray(items)) store.set('own:' + id, items);
   // A backup without keys keeps the keys already on this device.
   if (!backup.includesKeys) store.set('settings', { ...store.get('settings', {}), keys: keepKeys, relayToken: keepRelayToken });
   await flush();
+  frozen = true; // until the page reloads
   return true;
 }
 
 async function eraseEverything() {
+  stopRefresh = true;
   for (const k of store.keys()) store.del(k);
   await flush();
+  frozen = true;
   try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k?.startsWith('sr.')) localStorage.removeItem(k); } } catch { /* blocked */ }
 }
 
@@ -1323,8 +1454,13 @@ async function importOPML(file) {
     const parent = o.parentElement?.closest('outline:not([xmlUrl])');
     found.push({ url: o.getAttribute('xmlUrl'), title: o.getAttribute('title') || o.getAttribute('text') || host(o.getAttribute('xmlUrl')), folder: parent?.getAttribute('title') || parent?.getAttribute('text') || '' });
   }
+  // Skip feeds you already have, odd addresses, and repeats (OPML files often list a feed in two folders).
   const have = new Set(S.feeds.map((f) => f.url));
-  const fresh = found.filter((f) => !have.has(f.url));
+  const fresh = found.filter((f) => {
+    if (!safeUrl(f.url) || have.has(f.url)) return false;
+    have.add(f.url);
+    return true;
+  });
   const catalog = catalogByUrl();
   S.subs ??= [];
   for (const f of fresh) {
@@ -1350,6 +1486,21 @@ function closeSidebar() { document.body.classList.remove('nav-open'); $('#scrim'
 
 function wire() {
   addEventListener('hashchange', route);
+
+  // Another tab of the reader saved something: pick it up without losing your place.
+  channel?.addEventListener('message', async (e) => {
+    const keys = e.data?.keys;
+    if (!Array.isArray(keys) || frozen) return;
+    await reloadKeys(keys);
+    loadState();
+    applyTheme();
+    rebuild();
+    renderSidebar();
+    renderHeaderCounts();
+    renderStreak();
+    for (const a of document.querySelectorAll('#list article.entry')) updateEntryDom(a.dataset.id);
+    if (S.view.type === 'home') render();
+  });
 
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1481,7 +1632,7 @@ function wire() {
     } catch (err) { $('#modelStatus').textContent = err.message; }
   });
   $('#orSignInBtn').addEventListener('click', () => startOpenRouterSignIn());
-  $('#thresholdRange').addEventListener('input', (e) => { S.settings.threshold = +e.target.value; $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`; saveSettings(); });
+  $('#thresholdRange').addEventListener('input', (e) => { S.version++; S.settings.threshold = +e.target.value; $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`; saveSettings(); });
   $('#settingsDialog').addEventListener('close', () => render());
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
   $('#exportOpml').addEventListener('click', exportOPML);
@@ -1547,7 +1698,7 @@ function wire() {
       case 'o': case 'Enter': if (curEl) toggleEntry(curEl); else select(0); break;
       case 's': if (curEl) toggleStar(curEl.dataset.id); break;
       case 'm': if (curEl) { S.view.keep?.add(curEl.dataset.id); markRead(curEl.dataset.id, !isRead(curEl.dataset.id)); } break;
-      case 'v': if (curEl) { const it = S.byId.get(curEl.dataset.id) || S.starred[curEl.dataset.id]; window.open(it.l, '_blank', 'noopener'); } break;
+      case 'v': if (curEl) { const it = S.byId.get(curEl.dataset.id) || S.starred[curEl.dataset.id]; if (safeUrl(it.l)) window.open(safeUrl(it.l), '_blank', 'noopener,noreferrer'); } break;
       case 'A': if (e.shiftKey && S.view.type !== 'home') markAllRead(sourceItems()); break;
       case '/': e.preventDefault(); $('#q').focus(); $('#q').select(); break;
       case 'x': surprise(); break;
