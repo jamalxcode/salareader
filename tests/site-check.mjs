@@ -46,15 +46,19 @@ await step('opening an article shows its text', async () => {
 await step('AI search by meaning (downloads the model)', async () => {
   await page.fill('#q', 'space exploration and rockets');
   await page.press('#q', 'Enter');
+  await page.waitForFunction(() => location.hash.startsWith('#/search/'), null, { timeout: 10000 });
+  const t0 = Date.now();
+  let last = '';
   await page.waitForFunction(() => {
     const sub = document.querySelector('#viewHeader .sub')?.textContent || '';
-    return !/Finding articles|Downloading/.test(sub);
-  }, null, { timeout: 240000 });
+    return location.hash.startsWith('#/search/') && sub && !/Finding articles|Downloading/.test(sub);
+  }, null, { timeout: 240000, polling: 500 }).catch(async (e) => { last = await page.$eval('#viewHeader .sub', (x) => x.textContent).catch(() => '?'); throw new Error(`still "${last}"`); });
+  info('AI search took', `${Math.round((Date.now() - t0) / 1000)} s`);
   const sub = await page.$eval('#viewHeader .sub', (e) => e.textContent);
   if (/Couldn't load the AI model|word matches/.test(sub)) throw new Error(sub);
   const n = await page.$$eval('article.entry', (a) => a.length);
   const pct = await page.$$eval('article.entry .match', (m) => m.slice(0, 3).map((x) => x.textContent));
-  if (!n) throw new Error('no results');
+  if (!n) throw new Error(`no results; header says "${sub}"; empty text: ${await page.$eval('#list', (e) => e.textContent.trim().slice(0, 120))}`);
   return `${n} results, top matches ${pct.join(' ')}`;
 });
 

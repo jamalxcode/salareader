@@ -103,13 +103,24 @@ let openaiPromise = null;
 const loadAnthropic = () => (anthropicPromise ??= import(ANTHROPIC_SDK_URL).catch((e) => { anthropicPromise = null; throw e; }));
 const loadOpenAI = () => (openaiPromise ??= import(OPENAI_SDK_URL).catch((e) => { openaiPromise = null; throw e; }));
 
+/**
+ * fetch without the SDK's x-stainless-* headers (OS, runtime and library
+ * versions). They tell each AI company about your device, and Gemini
+ * refuses browser requests that carry them.
+ */
+function plainFetch(url, init = {}) {
+  const headers = new Headers(init.headers);
+  for (const k of [...headers.keys()]) if (k.startsWith('x-stainless')) headers.delete(k);
+  return fetch(url, { ...init, headers });
+}
+
 async function openaiClient(p, apiKey) {
   const mod = await loadOpenAI();
   const OpenAI = mod.default || mod.OpenAI;
   const defaultHeaders = p.id === 'openrouter'
     ? { 'HTTP-Referer': 'https://reader.sala.company', 'X-Title': 'Sala Reader' } // OpenRouter's app attribution
     : undefined;
-  return { OpenAI, client: new OpenAI({ apiKey, baseURL: p.base, dangerouslyAllowBrowser: true, defaultHeaders }) };
+  return { OpenAI, client: new OpenAI({ apiKey, baseURL: p.base, dangerouslyAllowBrowser: true, defaultHeaders, fetch: plainFetch }) };
 }
 
 // Skip models that can't chat (images, audio, embeddings, …). Same rules as jamalterm.
@@ -200,6 +211,10 @@ function friendlyError(p, e, OpenAI) {
   if (OpenAI && e instanceof OpenAI.APIError) {
     switch (e.status) {
       case 401: case 403: return new Error(`${p.name} didn't accept your API key. Check it in ⚙ Settings.`);
+      case 400:
+        // Gemini and Grok answer a bad key with 400.
+        if (/api[ _-]?key|incorrect key|invalid key|authenticat/i.test(String(e.message))) return new Error(`${p.name} didn't accept your API key. Check it in ⚙ Settings.`);
+        return new Error(`${p.name} couldn't handle that request (400). Try another model in ⚙ Settings.`);
       case 402: return new Error(`Your ${p.name} account is out of credit.`);
       case 404: return new Error(`That model isn't available to your ${p.name} key. Pick another in ⚙ Settings.`);
       case 429: return new Error(`${p.name} rate limit or quota reached. Try again in a moment, or check your plan's billing.`);
