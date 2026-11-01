@@ -43,6 +43,22 @@ await step('opening an article shows its text', async () => {
   return (await page.$eval('.body [data-content]', (e) => e.textContent.trim().slice(0, 80))) || '(empty)';
 });
 
+const consoleMsgs = [];
+page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) consoleMsgs.push(m.text().slice(0, 300)); });
+page.on('requestfailed', (r) => consoleMsgs.push(`request failed: ${r.url().slice(0, 150)} ${r.failure()?.errorText}`));
+
+await step('AI model loads in the browser', async () => {
+  const r = await page.evaluate(async () => {
+    try {
+      const ai = await import('/ai.js');
+      const [v] = await ai.embed(['hello world']);
+      return `ok, ${v.length} numbers`;
+    } catch (e) { return 'ERROR ' + (e && (e.stack || e.message) || String(e)); }
+  });
+  if (r.startsWith('ERROR')) throw new Error(r.slice(0, 600) + ' || console: ' + consoleMsgs.slice(-6).join(' | '));
+  return r;
+});
+
 await step('AI search by meaning (downloads the model)', async () => {
   await page.fill('#q', 'space exploration and rockets');
   await page.press('#q', 'Enter');
