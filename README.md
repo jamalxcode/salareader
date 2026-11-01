@@ -62,7 +62,7 @@ cron-job.org ──(every 30 min)──▶ GitHub API: run update.yml
   - `data/content.json`: full article text for every feed in one file, loaded when you open an article;
   - `data/vectors.json`: the AI vectors, loaded when you search.
 - **The `data` branch** keeps the last run's data, so history survives between runs. It's force-pushed as a single commit, so the repo doesn't grow.
-- **Your own feeds** (＋ Subscribe or OPML import, when not in the catalog) are fetched by the page itself, every time it opens and every 30 minutes while it's open. It asks the feed's site directly. Most sites block that, so it then asks [the relay](#the-relay).
+- **Your own feeds** (＋ Subscribe or OPML import, when not in the catalog) are fetched by the page itself, when it opens and about every 25 minutes while it's open. Requests to the relay are paced to its limit of 60 a minute, so a big OPML import takes a few minutes, with articles appearing as each feed arrives. It asks the feed's site directly. Most sites block that, so it then asks [the relay](#the-relay).
 
 ## The relay
 

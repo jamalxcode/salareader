@@ -386,3 +386,4 @@ dialog label.check { display: flex; align-items: center; gap: 8px; font-weight: 
 .device-ico { font-size: 22px; }
 .device-actions { display: flex; gap: 8px; }
 .device-foot { margin: 32px 0 0; padding-top: 14px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-3); }
+.nav-note.progress { color: var(--accent); font-weight: 600; }

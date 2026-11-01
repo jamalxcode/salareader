@@ -299,11 +299,32 @@ function relayUrl() {
  * Fetches a feed straight from its site, or through the relay. Never a public proxy.
  * For a web page, the relay answers with just the feed links on it (JSON).
  */
-async function fetchFeedText(url, { relayOnly = false } = {}) {
-  if (!relayOnly) try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15000), credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
-    if (res.ok) return await res.text();
-  } catch { /* the site doesn't let web pages read it: try the relay */ }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The relay allows 60 requests a minute per person, so requests to it are
+// paced to just under that, one after another.
+const RELAY_GAP_MS = 1100;
+let relayQueue = Promise.resolve();
+let relayNextAt = 0;
+function relayTurn() {
+  const turn = relayQueue.then(async () => {
+    const wait = relayNextAt - Date.now();
+    if (wait > 0) await sleep(wait);
+    relayNextAt = Date.now() + RELAY_GAP_MS;
+  });
+  relayQueue = turn.catch(() => {});
+  return turn;
+}
+
+async function fetchFeedText(url, { relayOnly = false, feed = null } = {}) {
+  // Try the site directly, unless we already know it blocks web pages.
+  if (!relayOnly && feed?.direct !== false) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(15000), credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
+      if (res.ok) { if (feed) feed.direct = true; return await res.text(); }
+    } catch { /* the site doesn't let web pages read it: use the relay */ }
+    if (feed) feed.direct = false;
+  }
   const relay = relayUrl();
   const own = S.settings.relayMode === 'own';
   if (!relay) {
@@ -312,12 +333,19 @@ async function fetchFeedText(url, { relayOnly = false } = {}) {
       : "This site doesn't let web pages read its feed, and the relay is turned off in ⚙ Settings → Your feeds.");
   }
   const name = own ? 'your relay' : 'the shared relay';
-  const res = await fetch(`${relay}/?url=${encodeURIComponent(url)}`, {
-    signal: AbortSignal.timeout(20000),
-    credentials: 'omit',
-    referrerPolicy: 'no-referrer',
-    headers: own && S.settings.relayToken ? { 'X-Relay-Token': S.settings.relayToken } : {},
-  }).catch(() => { throw new Error(`Couldn't reach ${name}.${own ? ' Check its address in ⚙ Settings.' : ' Try again in a moment.'}`); });
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    await relayTurn();
+    res = await fetch(`${relay}/?url=${encodeURIComponent(url)}`, {
+      signal: AbortSignal.timeout(20000),
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      headers: own && S.settings.relayToken ? { 'X-Relay-Token': S.settings.relayToken } : {},
+    }).catch(() => { throw new Error(`Couldn't reach ${name}.${own ? ' Check its address in ⚙ Settings.' : ' Try again in a moment.'}`); });
+    if (res.status !== 429 || attempt >= 2) break;
+    // Over the limit: everyone waits a minute, then carries on.
+    relayNextAt = Math.max(relayNextAt, Date.now() + 61_000);
+  }
   if (res.status === 401) throw new Error('Your relay rejected the token. Check it in ⚙ Settings.');
   if (res.status === 403) throw new Error(own ? "Your relay doesn't allow this site. Check ALLOWED_ORIGIN in the Worker." : 'The shared relay refused this request.');
   if (res.status === 429) throw new Error(`${own ? 'Your' : 'The shared'} relay is busy. Try again in a minute.`);
@@ -328,9 +356,26 @@ async function fetchFeedText(url, { relayOnly = false } = {}) {
   return res.text();
 }
 
+/** Turns HTML-only entities (&nbsp; …) and stray & into ones XML accepts. */
+function repairXML(xml) {
+  const ta = document.createElement('textarea');
+  return xml
+    .replace(/&([a-zA-Z][a-zA-Z0-9]{1,31});/g, (m, name) => {
+      if (['amp', 'lt', 'gt', 'quot', 'apos'].includes(name)) return m;
+      ta.innerHTML = m;
+      const ch = ta.value;
+      return ch === m ? `&amp;${name};` : [...ch].map((c) => `&#${c.codePointAt(0)};`).join('');
+    })
+    .replace(/&(?!#\d+;|#x[0-9a-fA-F]+;|[a-zA-Z][a-zA-Z0-9]*;)/g, '&amp;')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+}
+
 function parseFeedXML(xml, feedUrl, feedId) {
-  const doc = new DOMParser().parseFromString(xml, 'text/xml');
-  if (doc.querySelector('parsererror')) return null;
+  let doc = new DOMParser().parseFromString(xml, 'text/xml');
+  if (doc.querySelector('parsererror')) {
+    doc = new DOMParser().parseFromString(repairXML(xml), 'text/xml');
+    if (doc.querySelector('parsererror')) return null;
+  }
   const root = doc.documentElement;
   const name = root.localName;
   if (!['rss', 'feed', 'RDF'].includes(name)) return null;
@@ -381,7 +426,7 @@ function discoverFeed(html, pageUrl) {
 }
 
 async function fetchOwnFeed(feed, xml) {
-  xml ??= await fetchFeedText(feed.url);
+  xml ??= await fetchFeedText(feed.url, { feed });
   const parsed = parseFeedXML(xml, feed.url, feed.id);
   if (!parsed) throw new Error('Not an RSS or Atom feed');
   const old = new Map((S.ownItems[feed.id] || []).map((i) => [i.id, i]));
@@ -398,14 +443,47 @@ async function fetchOwnFeed(feed, xml) {
   return parsed;
 }
 
-async function refreshOwnFeeds() {
-  const own = (S.subs || []).filter((s) => !catalogByUrl().has(s.url));
-  for (let i = 0; i < own.length; i += 4) {
-    await Promise.all(own.slice(i, i + 4).map(async (f) => {
-      try { await fetchOwnFeed(f); } catch (e) { f.error = e.message || 'Could not fetch'; }
+const OWN_REFRESH_MS = 25 * 60 * 1000;
+let ownRefreshing = null;
+
+/**
+ * Fetches your own feeds that are due (or all of them with force), a few at
+ * a time. Articles show up as each feed arrives.
+ */
+function refreshOwnFeeds({ force = false } = {}) {
+  // One run at a time; a request during a run runs again right after it.
+  if (ownRefreshing) return ownRefreshing.then(() => refreshOwnFeeds({ force }));
+  ownRefreshing = (async () => {
+    const catalog = catalogByUrl();
+    const due = (S.subs || []).filter((s) => !catalog.has(s.url) && (force || s.error || !s.ok || Date.now() - s.ok > OWN_REFRESH_MS));
+    if (!due.length) return;
+    S.ownProgress = { done: 0, total: due.length };
+    renderSidebar();
+    let lastPaint = 0;
+    const paint = (final) => {
+      if (!final && Date.now() - lastPaint < 1500) return;
+      lastPaint = Date.now();
+      rebuild();
+      saveSubs();
+      saveOwnItems();
+      renderSidebar();
+      // Fill an empty screen straight away; otherwise just update counts.
+      if (final || S.view.type === 'home' || !document.querySelector('#list article.entry')) render();
+      else renderHeaderCounts();
+    };
+    let next = 0;
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      while (next < due.length) {
+        const f = due[next++];
+        try { await fetchOwnFeed(f); } catch (e) { f.error = e.message || 'Could not fetch'; }
+        S.ownProgress.done++;
+        paint(false);
+      }
     }));
-  }
-  if (own.length) { saveSubs(); saveOwnItems(); }
+    S.ownProgress = null;
+    paint(true);
+  })().finally(() => { ownRefreshing = null; });
+  return ownRefreshing;
 }
 
 function subscribeCatalog(c, folder) {
@@ -711,6 +789,7 @@ function renderSidebar() {
       <div class="folder-feeds">${list.map(feedRow).join('')}</div></div>`;
   }
   if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
+  if (S.ownProgress) html += `<p class="nav-note progress">⟳ Fetching your feeds… ${S.ownProgress.done} of ${S.ownProgress.total}</p>`;
   html += `<p class="nav-note">${S.index.updated ? `Updated ${agoText(S.index.updated)}` : S.index.missing ? 'Waiting for the first feed update' : ''} · <button class="linkish" data-act="refresh">Refresh</button></p>`;
   nav.innerHTML = html;
 }
@@ -1148,7 +1227,7 @@ function openSettings() {
   renderAISettings();
   $('#thresholdRange').value = S.settings.threshold;
   $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`;
-  $('#updatesInfo').innerHTML = `The starter catalog is refreshed on GitHub whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} Your own feeds are fetched by this page when you open it, and every 30 minutes while it's open.`;
+  $('#updatesInfo').innerHTML = `The starter catalog is refreshed on GitHub whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} Your own feeds are fetched by this page: when you open it, and again about every 25 minutes while it's open. Requests to the relay are paced to its limit of 60 a minute, so a big import takes a few minutes; articles appear as each feed arrives.`;
   for (const r of document.querySelectorAll('input[name="relayMode"]')) r.checked = r.value === S.settings.relayMode;
   $('#ownRelay').hidden = S.settings.relayMode !== 'own';
   $('#relayInput').value = S.settings.relay;
@@ -1253,7 +1332,8 @@ async function importOPML(file) {
     S.subs.push(c ? { id: c.id, url: c.url, title: c.title, folder: f.folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder: f.folder, own: true, site: '' });
   }
   saveSubs();
-  toast(`Imported ${fresh.length} feed${fresh.length === 1 ? '' : 's'}${found.length > fresh.length ? ` (${found.length - fresh.length} you already had)` : ''}. Fetching…`, 4000);
+  const mins = Math.ceil(fresh.filter((f) => !catalog.has(f.url)).length / 55);
+  toast(`Imported ${fresh.length} feed${fresh.length === 1 ? '' : 's'}${found.length > fresh.length ? ` (${found.length - fresh.length} you already had)` : ''}. Fetching them${mins > 1 ? `, about ${mins} minutes` : ''}; articles appear as they arrive.`, 6000);
   rebuild(); render();
   await refreshOwnFeeds();
   rebuild(); render();
@@ -1519,7 +1599,8 @@ async function refresh() {
   const btn = $('#refreshBtn');
   btn.classList.add('spin');
   const before = S.index.updated;
-  await Promise.all([loadIndex(true), refreshOwnFeeds()]);
+  await loadIndex(true);
+  refreshOwnFeeds(); // in the background: articles appear as feeds arrive
   S.vectorsState = 'none';
   rebuild();
   if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); });
@@ -1546,9 +1627,9 @@ async function start() {
   renderStreak();
   route();
   if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); });
-  const quietOwnRefresh = () => refreshOwnFeeds().then(() => { rebuild(); renderSidebar(); renderHeaderCounts(); });
-  if (S.feeds.some((f) => f.own)) quietOwnRefresh();
-  setInterval(() => { if (document.visibilityState === 'visible' && S.feeds.some((f) => f.own)) quietOwnRefresh(); }, 30 * 60 * 1000);
+  // Your own feeds: those due now, then every few minutes while the page is open.
+  if (S.feeds.some((f) => f.own)) refreshOwnFeeds();
+  setInterval(() => { if (document.visibilityState === 'visible' && S.feeds.some((f) => f.own)) refreshOwnFeeds(); }, 5 * 60 * 1000);
 }
 
 start();
