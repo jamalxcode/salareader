@@ -234,7 +234,7 @@ function avatar(f, big = false) {
   return `<span class="fav av${big ? ' big' : ''}" style="--h:${hue}" aria-hidden="true">${esc(letter)}</span>`;
 }
 /** Only web links: a feed's javascript: or data: "link" would otherwise run code here. */
-const safeUrl = (u, base) => { try { const x = new URL(u, base); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } };
+const safeUrl = (u, base) => { if (!u) return ''; try { const x = new URL(u, base); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } };
 const isRead = (id) => id in S.read;
 const strip = (html) => { const d = document.createElement('div'); d.innerHTML = DOMPurifySafe(html); return (d.textContent || '').replace(/\s+/g, ' ').trim(); };
 function DOMPurifySafe(html) { return window.DOMPurify ? window.DOMPurify.sanitize(html) : String(html).replace(/<[^>]+>/g, ' '); }
@@ -261,13 +261,17 @@ function toast(msg, ms = 2600) {
 
 // ---------- the shared catalog ----------
 
+/** Loads the shared catalog. Returns false if it couldn't (a catalog already loaded is kept). */
 async function loadIndex(bust) {
   try {
     const res = await fetch(`data/index.json${bust ? `?t=${Date.now()}` : ''}`, { cache: bust ? 'no-store' : 'default' });
     if (!res.ok) throw new Error(res.status);
     S.index = await res.json();
   } catch {
+    if (!S.index.missing && S.index.feeds.length) return false; // keep what you have
     S.index = { feeds: [], items: [], updated: 0, missing: true };
+    rebuild();
+    return false;
   }
   S.content = null;
   // First visit: start with every catalog feed (you can unsubscribe any).
@@ -278,12 +282,19 @@ async function loadIndex(bust) {
     if (S.pendingOwn) { store.del('localFeeds'); S.pendingOwn = null; }
   }
   if (!S.index.missing && S.subs) {
+    // A feed taken out of the catalog (or moved to another address there) keeps
+    // working for you: this page fetches it from now on.
+    const inCatalog = catalogByUrl();
+    let moved = 0;
+    for (const sub of S.subs) if (!sub.own && !inCatalog.has(sub.url)) { sub.own = true; sub.id = 'L' + hash(sub.url); moved++; }
+    if (moved) saveSubs();
     // Articles stored for feeds that aren't your own any more (unsubscribed, or now in the catalog).
     const catalog = catalogByUrl();
     const ownIds = new Set(S.subs.filter((x) => x.own && !catalog.has(x.url)).map((x) => x.id));
     for (const id of Object.keys(S.ownItems)) if (!ownIds.has(id)) { delete S.ownItems[id]; store.del('own:' + id); store.del('vec:' + id); }
   }
   rebuild();
+  return true;
 }
 
 const catalogByUrl = () => new Map(S.index.feeds.map((f) => [f.url, f]));
@@ -357,7 +368,7 @@ async function vectorsForTopics() {
   try {
     await ensureVectors(missing);
     renderSidebar();
-    if (S.view.type === 'home') render();
+    if (S.view.type === 'home') refreshHome();
     else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); }
   } catch (e) { console.warn('Topic vectors', e); } finally { topicVectorsRunning = false; }
 }
@@ -490,18 +501,40 @@ function parseFeedXML(xml, feedUrl, feedId) {
   const txt = (el, ...tags) => { for (const t of tags) { const c = child(el, t); if (c && c.textContent.trim()) return c.textContent.trim(); } return ''; };
   const channel = atom ? root : child(root, 'channel') || root;
   const linkOf = (el) => {
-    if (!atom) return txt(el, 'link') || txt(el, 'guid');
+    if (!atom) {
+      // An RSS guid is a link only if it isn't isPermaLink="false" and is a web address.
+      const g = child(el, 'guid');
+      const guidLink = g && g.getAttribute('isPermaLink') !== 'false' && /^https?:\/\//i.test(g.textContent.trim()) ? g.textContent.trim() : '';
+      return txt(el, 'link') || guidLink;
+    }
     const links = [...el.children].filter((c) => c.localName === 'link');
     const alt = links.find((l) => (l.getAttribute('rel') || 'alternate') === 'alternate') || links[0];
     return alt?.getAttribute('href') || '';
   };
   const abs = (u, base) => safeUrl(u, base);
   const site = abs(linkOf(channel), feedUrl);
+  // Atom's xml:base sets the address relative links are resolved against.
+  const feedBase = abs(root.getAttribute('xml:base'), feedUrl) || feedUrl;
+  /** Article HTML; Atom type="xhtml" holds real markup, so take it as markup. */
+  const htmlOf = (el) => {
+    for (const t of ['content:encoded', 'encoded', 'content', 'description', 'summary']) {
+      const c = child(el, t);
+      if (!c) continue;
+      const v = c.getAttribute('type') === 'xhtml' ? c.innerHTML.trim() : c.textContent.trim();
+      if (v) return v;
+    }
+    return '';
+  };
+  const seenGuids = new Set();
   const entries = atom ? [...root.children].filter((c) => c.localName === 'entry') : [...doc.getElementsByTagName('item')];
   const items = entries.slice(0, 60).map((el, idx) => {
-    const html = txt(el, 'content:encoded', 'encoded', 'content', 'description', 'summary');
-    const link = abs(linkOf(el), site || feedUrl);
-    const guid = txt(el, 'guid', 'id') || link;
+    const html = htmlOf(el);
+    const base = atom ? abs(el.getAttribute('xml:base'), feedBase) || feedBase : site || feedUrl;
+    const link = abs(linkOf(el), base);
+    let guid = txt(el, 'guid', 'id') || link || txt(el, 'title');
+    // Two items with the same id would collapse into one.
+    if (seenGuids.has(guid)) guid = `${guid}|${link || txt(el, 'title')}`;
+    seenGuids.add(guid);
     let d = Date.parse(txt(el, 'pubDate', 'published', 'updated', 'dc:date', 'date'));
     if (!Number.isFinite(d) || d > Date.now()) d = NaN;
     const media = [...el.getElementsByTagName('*')].find((c) => /^(thumbnail|content)$/.test(c.localName) && c.getAttribute('url') && /image|^$/.test(c.getAttribute('medium') || c.getAttribute('type') || ''));
@@ -569,6 +602,13 @@ function noteFeedError(feed, e) {
   saveSubs();
 }
 
+/** Redraws Home after a background update, unless you're reading a briefing there. */
+function refreshHome() {
+  const brief = $('#brief');
+  if (brief && !brief.hidden) { renderSidebar(); return; }
+  render();
+}
+
 /** New articles arrived while you're reading a list: a button shows them, nothing jumps. */
 function offerNew() {
   const shown = new Set(S.list.map((x) => x.id));
@@ -606,7 +646,8 @@ function refreshOwnFeeds({ force = false } = {}) {
       renderSidebar();
       // Fill an empty list or Home; otherwise leave what you're reading alone
       // and offer the new articles.
-      if (S.view.type === 'home' || !document.querySelector('#list article.entry')) render();
+      if (S.view.type === 'home') refreshHome();
+      else if (!document.querySelector('#list article.entry')) render();
       else { renderHeaderCounts(); if (final) offerNew(); }
       if (final) vectorsForTopics();
     };
@@ -761,9 +802,12 @@ function topicMatches(topic) {
   return result;
 }
 
+/** Whole words only, so "AI" doesn't match "said" (letters and digits in any language). */
+const wordRe = (text) => new RegExp(`(?<![\\p{L}\\p{N}])${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu');
+
 function computeTopic(topic) {
-  const words = topic.query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-  const phrase = topic.query.toLowerCase();
+  const words = topic.query.trim().split(/\s+/).filter((w) => w.length > 2).map(wordRe);
+  const phrase = wordRe(topic.query.trim());
   const qv = topic.qv ? Float32Array.from(topic.qv) : null;
   const out = [];
   const scores = {};
@@ -772,8 +816,8 @@ function computeTopic(topic) {
     let score = 0;
     const v = S.vectors.get(it.id);
     if (qv && v) score = dot(qv, v);
-    if (hay.includes(phrase)) score = Math.max(score, 0.99);
-    else if (words.length > 1 && words.every((w) => hay.includes(w))) score = Math.max(score, S.settings.threshold + 0.05);
+    if (phrase.test(hay)) score = Math.max(score, 0.99);
+    else if (words.length > 1 && words.every((w) => w.test(hay))) score = Math.max(score, S.settings.threshold + 0.05);
     if (score >= S.settings.threshold) { out.push(it); scores[it.id] = score; }
   }
   return { items: out, scores };
@@ -846,14 +890,17 @@ function sourceItems() {
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const [type, ...rest] = parts;
-  const arg = decodeURIComponent(rest.join('/'));
+  let arg = rest.join('/');
+  try { arg = decodeURIComponent(arg); } catch { /* a stray % typed in the address */ }
   const prevKey = JSON.stringify([S.view.type, S.view.id, S.view.q]);
+  const prevKeep = S.view.keep;
   if (type === 'all' || type === 'starred') S.view = { type };
   else if (type === 'feed' || type === 'folder' || type === 'topic') S.view = { type, id: arg };
   else if (type === 'search' && arg) {
     if (S.view.type !== 'search' || S.view.q !== arg) { S.view = { type: 'search', q: arg }; runSearch(arg); }
   } else S.view = { type: 'home' };
-  if (JSON.stringify([S.view.type, S.view.id, S.view.q]) !== prevKey) S.view.keep = new Set();
+  // Articles you opened stay visible in "Unread" until you go to another view.
+  S.view.keep = JSON.stringify([S.view.type, S.view.id, S.view.q]) === prevKey && prevKeep ? prevKeep : new Set();
   $('#q').value = S.view.type === 'search' ? S.view.q : '';
   S.cur = -1;
   closeSidebar();
@@ -870,7 +917,8 @@ async function runSearch(q) {
   const v = S.view;
   const lower = q.toLowerCase();
   const words = lower.split(/\s+/).filter(Boolean);
-  const keyword = (it) => { const hay = `${it.t} ${it.s} ${S.feedById.get(it.f)?.title || ''}`.toLowerCase(); return words.every((w) => hay.includes(w)); };
+  const wordTests = words.map(wordRe);
+  const keyword = (it) => { const hay = `${it.t} ${it.s} ${S.feedById.get(it.f)?.title || ''}`; return wordTests.every((w) => w.test(hay)); };
   // 1) Instant keyword results.
   v.results = S.items.filter(keyword).slice(0, 200);
   v.scores = null;
@@ -999,10 +1047,10 @@ function entryHTML(it, idx) {
   const score = S.scores?.[it.id];
   const expanded = S.settings.mode === 'expanded';
   return `<article class="entry${read ? ' read' : ''}${expanded ? ' expanded' : ''}" data-id="${esc(it.id)}" data-idx="${idx}">
-    <div class="row" role="button" tabindex="-1">
+    <div class="row">
       <button class="star${star ? ' on' : ''}" data-act="star" aria-label="${star ? 'Unstar' : 'Star'}" title="Star (s)">${star ? '★' : '☆'}</button>
       <span class="src">${avatar(f)}${esc(f?.title || '')}</span>
-      <span class="line"><span class="t">${esc(it.t)}</span><span class="snip"> – ${esc(it.s)}</span></span>
+      <button type="button" class="line" data-act="toggle" aria-expanded="${expanded}"><span class="t">${esc(it.t)}</span><span class="snip"> – ${esc(it.s)}</span></button>
       ${score != null && score < 0.99 ? `<span class="match" title="How closely this matches">${Math.round(Math.min(score, 1) * 100)}%</span>` : ''}
       <time datetime="${new Date(it.d).toISOString()}" title="${esc(new Date(it.d).toLocaleString())}">${ago(it.d)}</time>
     </div>
@@ -1052,6 +1100,7 @@ function sanitize(html, base) {
     a.rel = 'noopener noreferrer';
   }
   for (const img of tpl.content.querySelectorAll('img')) {
+    if (!img.hasAttribute('alt')) img.alt = ''; // no description from the feed: decorative, so screen readers skip it
     const src = img.getAttribute('src') || img.getAttribute('data-src');
     if (src) { try { img.src = new URL(src, base).href; } catch { /* keep */ } }
     img.removeAttribute('srcset');
@@ -1063,7 +1112,7 @@ function sanitize(html, base) {
 
 function renderList(reset = true) {
   const list = $('#list');
-  if (reset) { S.list = viewItems(); S.shown = 0; list.innerHTML = ''; }
+  if (reset) { S.list = viewItems(); S.shown = 0; S.cur = -1; list.innerHTML = ''; }
   if (!S.list.length) {
     list.innerHTML = emptyHTML();
     return;
@@ -1199,6 +1248,7 @@ function openEntry(a) {
   const id = a.dataset.id;
   if (S.settings.mode === 'list' && !a.classList.contains('open')) {
     a.classList.add('open');
+    a.querySelector('.line')?.setAttribute('aria-expanded', 'true');
     a.insertAdjacentHTML('beforeend', `<div class="body">${bodyHTML(S.byId.get(id) || S.starred[id])}</div>`);
     fillContent(a);
   }
@@ -1208,6 +1258,7 @@ function openEntry(a) {
 
 function closeEntry(a) {
   a.classList.remove('open');
+  a.querySelector('.line')?.setAttribute('aria-expanded', 'false');
   a.querySelector('.body')?.remove();
 }
 
@@ -1554,7 +1605,7 @@ function wire() {
     renderHeaderCounts();
     renderStreak();
     for (const a of document.querySelectorAll('#list article.entry')) updateEntryDom(a.dataset.id);
-    if (S.view.type === 'home') render();
+    if (S.view.type === 'home') refreshHome();
   });
 
   $('#searchForm').addEventListener('submit', (e) => {
@@ -1628,6 +1679,9 @@ function wire() {
     }
   });
 
+  // Close/Cancel buttons (not submit buttons, so Enter in a field submits the form)
+  document.addEventListener('click', (e) => { const c = e.target.closest('[data-close]'); if (c) c.closest('dialog')?.close(); });
+
   // Add-feed dialog
   $('#discoverList').addEventListener('click', (e) => {
     const b = e.target.closest('[data-sub]');
@@ -1655,7 +1709,9 @@ function wire() {
     if (e.submitter?.value !== 'ok') return;
     e.preventDefault();
     try {
-      const t = await createTopic($('#topicQuery').value.trim());
+      const q = $('#topicQuery').value.trim();
+      if (!q) { $('#topicStatus').textContent = 'Type what the topic is about.'; return; }
+      const t = await createTopic(q);
       $('#topicDialog').close();
       go(`#/topic/${t.id}`);
     } catch (err) {
@@ -1738,7 +1794,7 @@ function wire() {
   let gPending = false;
   document.addEventListener('keydown', (e) => {
     // Alt+1–6 switches the AI assistant, like ⌥⌘1–6 in jamalterm.
-    if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-6]$/.test(e.code)) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-6]$/.test(e.code) && !e.target.closest('input, textarea, [contenteditable]')) {
       e.preventDefault();
       switchProvider(PROVIDERS[+e.code.slice(5) - 1].id);
       if ($('#settingsDialog').open) renderAISettings();
@@ -1771,7 +1827,7 @@ function wire() {
       case '/': e.preventDefault(); $('#q').focus(); $('#q').select(); break;
       case 'x': surprise(); break;
       case 'r': refresh(); break;
-      case 'u': document.body.classList.toggle(innerWidth < 860 ? 'nav-open' : 'nav-hidden'); break;
+      case 'u': if (innerWidth < 860) { if (document.body.classList.contains('nav-open')) closeSidebar(); else openSidebar(); } else document.body.classList.toggle('nav-hidden'); break;
       case '1': setMode('list'); break;
       case '2': setMode('expanded'); break;
       case 'g': gPending = true; setTimeout(() => { gPending = false; }, 1200); break;
@@ -1818,11 +1874,16 @@ async function refresh() {
   const btn = $('#refreshBtn');
   btn.classList.add('spin');
   const before = S.index.updated;
-  await loadIndex(true);
+  const ok = await loadIndex(true);
   refreshOwnFeeds(); // in the background: articles appear as feeds arrive
+  if (ok === false) {
+    btn.classList.remove('spin');
+    toast("Couldn't reach Sala Reader to refresh. Check your connection; your articles are still here.", 5000);
+    return;
+  }
   S.vectorsState = 'none';
   rebuild();
-  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); });
+  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'home') refreshHome(); else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); } });
   render();
   btn.classList.remove('spin');
   toast(S.index.updated !== before ? 'Fresh articles loaded' : `Up to date (feeds updated ${agoText(S.index.updated)})`);
@@ -1845,7 +1906,7 @@ async function start() {
   await loadIndex(false);
   renderStreak();
   route();
-  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); vectorsForTopics(); });
+  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic') render(); else if (S.view.type === 'home') refreshHome(); vectorsForTopics(); });
   // Your own feeds: those due now, then every few minutes while the page is open.
   if (S.feeds.some((f) => f.own)) refreshOwnFeeds();
   setInterval(() => { if (document.visibilityState === 'visible' && S.feeds.some((f) => f.own)) refreshOwnFeeds(); }, 5 * 60 * 1000);

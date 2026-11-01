@@ -89,11 +89,23 @@ function firstImage(it, html) {
 
 /** Absolute http(s) links only: a feed's javascript: or data: "link" is dropped. */
 function absolute(url, base) {
+  if (!url) return '';
   try { const u = new URL(url, base); return /^https?:$/.test(u.protocol) ? u.href : ''; } catch { return ''; }
 }
 
+/**
+ * Atom type="xhtml" content holds real markup, which an XML parser would
+ * split into nodes (losing the text between tags). Keep it as HTML text.
+ */
+function xhtmlToHtml(xml) {
+  return xml.replace(/<(content|summary)\b([^>]*)\btype=["']xhtml["']([^>]*)>([\s\S]*?)<\/\1>/g,
+    (m, tag, a, b, inner) => `<${tag}${a}type="html"${b}><![CDATA[${inner.replace(/]]>/g, ']]&gt;')}]]></${tag}>`);
+}
+
+const contentHtml = (c) => text(c);
+
 export function parseFeed(xml, feedUrl) {
-  const doc = parser.parse(xml);
+  const doc = parser.parse(xhtmlToHtml(xml));
   let channel, items, kind;
   if (doc.rss) { kind = 'rss'; channel = doc.rss.channel || {}; items = arr(channel.item); }
   else if (doc.feed) { kind = 'atom'; channel = doc.feed; items = arr(channel.entry); }
@@ -106,11 +118,21 @@ export function parseFeed(xml, feedUrl) {
     site: absolute(site, feedUrl),
     items: [],
   };
+  // Atom's xml:base sets the address relative links are resolved against.
+  const feedBase = absolute(channel['@xml:base'] || '', feedUrl) || feedUrl;
+  const seenGuids = new Set();
   for (const it of items) {
     const title = stripTags(text(it.title)) || '(untitled)';
-    const link = absolute(kind === 'atom' ? atomLink(it.link) : text(arr(it.link)[0]) || text(it.guid), out.site || feedUrl);
-    const guid = text(it.guid) || text(it.id) || link || title;
-    const html = text(it['content:encoded']) || text(it.content) || text(it.description) || text(it.summary) || '';
+    const base = absolute(it['@xml:base'] || '', feedBase) || (kind === 'atom' ? feedBase : out.site || feedUrl);
+    // An RSS guid is a link only if it isn't marked isPermaLink="false" and is a web address.
+    const guidObj = arr(it.guid)[0];
+    const guidIsLink = !(typeof guidObj === 'object' && guidObj?.['@isPermaLink'] === 'false') && /^https?:\/\//i.test(text(it.guid));
+    const link = absolute(kind === 'atom' ? atomLink(it.link) : text(arr(it.link)[0]) || (guidIsLink ? text(it.guid) : ''), base);
+    let guid = text(it.guid) || text(it.id) || link || title;
+    // Two items with the same id would collapse into one.
+    if (seenGuids.has(guid)) guid = `${guid}|${link || title}`;
+    seenGuids.add(guid);
+    const html = text(it['content:encoded']) || contentHtml(it.content) || text(it.description) || contentHtml(it.summary) || '';
     const dateStr = text(it.pubDate) || text(it.published) || text(it.updated) || text(it['dc:date']);
     let d = Date.parse(dateStr);
     if (!Number.isFinite(d) || d > now + 864e5) d = NaN;
@@ -200,6 +222,9 @@ async function main() {
   }
   for (const f of config.feeds || []) wanted.push({ ...f, folder: f.folder || '' });
 
+  // When each undated item was first seen, kept longer than the items themselves,
+  // so an old undated item doesn't come back as "new" after it ages out.
+  const seen = await readJSON(path.join(DATA_DIR, 'seen.json'), {});
   const content = {}; // feedId -> {itemId: html}
   const prevContent = await readJSON(path.join(DATA_DIR, 'content.json'), {});
   for (const f of wanted) {
@@ -229,7 +254,9 @@ async function main() {
         const existing = map.get(itemId);
         // Undated items keep their first-seen time; idx keeps feed order stable.
         // Future dates (wrong time zones) are capped at the time we first saw the item.
-        const date = Number.isFinite(p.date) && p.date <= now ? p.date : existing?.d ?? (Number.isFinite(p.date) ? now : now - idx * 1000);
+        const firstSeen = existing?.d ?? seen[itemId];
+        const date = Number.isFinite(p.date) && p.date <= now ? p.date : firstSeen ?? (Number.isFinite(p.date) ? now : now - idx * 1000);
+        if (!(itemId in seen)) seen[itemId] = date;
         map.set(itemId, {
           id: itemId, f: id, t: p.title, l: p.link,
           d: date, s: stripTags(p.html).slice(0, 280),
@@ -284,6 +311,8 @@ async function main() {
   await writeFile(path.join(DATA_DIR, 'content.json'), JSON.stringify(allContent));
   await rm(path.join(DATA_DIR, 'content'), { recursive: true, force: true });
   await writeFile(path.join(DATA_DIR, 'vectors.json'), JSON.stringify({ model: MODEL, dim: 384, v: vectors }));
+  for (const [k, t] of Object.entries(seen)) if (t < now - 400 * 864e5) delete seen[k];
+  await writeFile(path.join(DATA_DIR, 'seen.json'), JSON.stringify(seen));
   await writeFile(path.join(DATA_DIR, 'index.json'), JSON.stringify({
     updated: now,
     feeds: feeds.map((x) => x.feed),
