@@ -143,6 +143,12 @@ await step('old Google News search address works (via Bing News)', async () => {
   await page.waitForFunction(() => !document.querySelector('.nav-note.progress') && [...document.querySelectorAll('#sidebar a.feed')].some((a) => /Google News/.test(a.textContent)), null, { timeout: 60000 });
   await page.click('#sidebar a.feed >> text=Google News');
   await page.waitForSelector('#viewHeader .sub');
+  const atClick = await page.evaluate(() => {
+    const S = window.__salareader; const id = location.hash.split('/')[2];
+    const items = S.items.filter((i) => i.f === id);
+    return { sub: document.querySelector('#viewHeader .sub').textContent, items: items.length, unread: items.filter((i) => !(i.id in S.read)).length, read: items.filter((i) => i.id in S.read).map((i) => i.id), progress: !!S.ownProgress, keep: [...(S.view.keep || [])] };
+  });
+  info('at click', JSON.stringify(atClick));
   const sub = await page.$eval('#viewHeader .sub', (e) => e.textContent);
   if (/Couldn't/.test(sub)) throw new Error(sub);
   await page.waitForTimeout(800);
