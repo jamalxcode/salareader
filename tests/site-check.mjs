@@ -108,7 +108,8 @@ await step('follow a news search (words in Subscribe)', async () => {
   await page.click('#addBtn');
   await page.fill('#addUrl', 'tbilisi');
   await page.press('#addUrl', 'Enter');
-  await page.waitForFunction(() => location.hash.startsWith('#/feed/L') || /couldn|isn't|refus|blocks/i.test(document.querySelector('#addStatus')?.textContent || ''), null, { timeout: 60000 });
+  await page.waitForFunction(() => location.hash.startsWith('#/feed/L') || /couldn|isn't|refus|blocks|gone|answered|relay/i.test(document.querySelector('#addStatus')?.textContent || ''), null, { timeout: 60000 })
+    .catch(async () => { throw new Error(`stuck: status "${await page.$eval('#addStatus', (e) => e.textContent)}", dialog open ${await page.$eval('#addDialog', (d) => d.open)}, hash ${await page.evaluate(() => location.hash)}, console: ${consoleMsgs.slice(-5).join(' | ')}`); });
   const hash = await page.evaluate(() => location.hash);
   if (!hash.startsWith('#/feed/L')) throw new Error(await page.$eval('#addStatus', (e) => e.textContent));
   await page.waitForSelector('article.entry', { timeout: 20000 });
