@@ -103,6 +103,25 @@ await step('add a website through the shared relay', async () => {
   return `${await page.$$eval('article.entry', (a) => a.length)} articles`;
 });
 
+await step('diagnose: Bing news feed in the browser', async () => {
+  const r = await page.evaluate(async () => {
+    const url = 'https://www.bing.com/news/search?q=tbilisi&format=rss';
+    const out = {};
+    try { const d = await fetch(url, { credentials: 'omit' }); out.direct = `${d.status} ${d.headers.get('content-type')}`; } catch (e) { out.direct = 'blocked: ' + e.message; }
+    const res = await fetch('https://salareader-relay.jamal-akuna-matata.workers.dev/?url=' + encodeURIComponent(url));
+    const text = await res.text();
+    out.relay = `${res.status} ${text.length} chars`;
+    const doc = new DOMParser().parseFromString(text, 'text/xml');
+    const err = doc.querySelector('parsererror');
+    out.parse = err ? 'ERROR ' + err.textContent.slice(0, 200) : `ok, root <${doc.documentElement.localName}>, ${doc.getElementsByTagName('item').length} items`;
+    if (err) { const m = /line (\d+) at column (\d+)/.exec(err.textContent); if (m) { const line = text.split('\n')[+m[1] - 1] || ''; out.near = JSON.stringify(line.slice(Math.max(0, +m[2] - 80), +m[2] + 40)); } }
+    return out;
+  });
+  info('bing diagnosis', JSON.stringify(r));
+  if (/ERROR/.test(r.parse)) throw new Error(r.parse);
+  return r.parse;
+});
+
 await step('follow a news search (words in Subscribe)', async () => {
   await page.goto(SITE + '/#/home');
   await page.click('#addBtn');
