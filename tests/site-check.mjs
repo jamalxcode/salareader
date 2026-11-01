@@ -143,26 +143,8 @@ await step('old Google News search address works (via Bing News)', async () => {
   await page.waitForFunction(() => !document.querySelector('.nav-note.progress') && [...document.querySelectorAll('#sidebar a.feed')].some((a) => /Google News/.test(a.textContent)), null, { timeout: 60000 });
   await page.click('#sidebar a.feed >> text=Google News');
   await page.waitForSelector('#viewHeader .sub');
-  const atClick = await page.evaluate(() => {
-    const S = window.__salareader; const id = location.hash.split('/')[2];
-    const items = S.items.filter((i) => i.f === id);
-    return { sub: document.querySelector('#viewHeader .sub').textContent, items: items.length, unread: items.filter((i) => !(i.id in S.read)).length, read: items.filter((i) => i.id in S.read).map((i) => i.id), progress: !!S.ownProgress, keep: [...(S.view.keep || [])] };
-  });
-  info('at click', JSON.stringify(atClick));
   const sub = await page.$eval('#viewHeader .sub', (e) => e.textContent);
   if (/Couldn't/.test(sub)) throw new Error(sub);
-  await page.waitForTimeout(800);
-  const dbg = await page.evaluate(() => new Promise((res) => { const r = indexedDB.open('salareader'); r.onsuccess = () => { const tx = r.result.transaction('kv'); const os = tx.objectStore('kv'); const out = {}; const q = os.openCursor(); q.onsuccess = () => { const c = q.result; if (c) { if (c.key === 'read' || c.key === 'subs' || c.key.startsWith('own:')) out[c.key] = c.value; c.continue(); } }; tx.oncomplete = () => res(out); }; }));
-  const read = Object.keys(dbg.read || {});
-  const own = Object.entries(dbg).filter(([k]) => k.startsWith('own:')).map(([k, items]) => ({ feed: k, n: items.length, readHere: items.filter((i) => read.includes(i.id)).map((i) => ({ id: i.id, f: i.f, t: i.t.slice(0, 40), l: i.l })) }));
-  const mem = await page.evaluate(() => {
-    const S = window.__salareader; if (!S) return 'no debug hook';
-    const id = location.hash.split('/')[2];
-    const items = S.items.filter((i) => i.f === id);
-    return { view: location.hash, items: items.length, unreadCounted: items.filter((i) => !(i.id in S.read)).length, readInMemory: items.filter((i) => i.id in S.read).map((i) => ({ id: i.id, t: i.t.slice(0, 40) })), dupIds: items.length - new Set(items.map((i) => i.id)).size, ownItemsLen: (S.ownItems[id] || []).length, rowsShown: document.querySelectorAll('article.entry').length };
-  });
-  info('in-memory debug', JSON.stringify(mem));
-  info('read-state debug', JSON.stringify({ read, subs: (dbg.subs || []).filter((x) => x.own).map((x) => ({ id: x.id, url: x.url.slice(0, 60), via: x.via })), own }));
   return sub;
 });
 
