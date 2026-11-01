@@ -120,6 +120,70 @@ for (const [id, model] of providers) {
   else info(`AI ${id}: NOT reachable from the browser`, r.slice(0, 160));
 }
 
+// ---------- phone ----------
+const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+phone.on('pageerror', (e) => pageErrors.push('phone: ' + e.message));
+const overflow = (p) => p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+
+await step('phone: home fits the screen', async () => {
+  await phone.goto(SITE + '/');
+  await phone.waitForSelector('.hero');
+  const o = await overflow(phone);
+  if (o > 1) throw new Error(`page is ${o}px wider than the screen`);
+});
+
+await step('phone: menu opens the subscriptions, picking one closes it', async () => {
+  await phone.tap('#menuBtn');
+  await phone.waitForTimeout(400);
+  const open = await phone.evaluate(() => document.body.classList.contains('nav-open') && document.querySelector('#sidebar').getBoundingClientRect().left >= 0);
+  if (!open) throw new Error('sidebar did not slide in');
+  await phone.tap('#sidebar a.feed');
+  await phone.waitForTimeout(400);
+  if (await phone.evaluate(() => document.body.classList.contains('nav-open'))) throw new Error('sidebar stayed open');
+  await phone.waitForSelector('article.entry');
+});
+
+await step('phone: an open article fits the screen', async () => {
+  await phone.tap('article.entry .row');
+  await phone.waitForSelector('.body .actions');
+  await phone.waitForTimeout(800);
+  const o = await overflow(phone);
+  if (o > 1) throw new Error(`page is ${o}px wider than the screen`);
+});
+
+await step('phone: Settings dialog fits and scrolls', async () => {
+  await phone.tap('#settingsBtn');
+  const r = await phone.$eval('#settingsDialog', (d) => { const b = d.getBoundingClientRect(); return { w: b.width, right: b.right, h: b.height, sh: d.scrollHeight, vw: innerWidth, vh: innerHeight }; });
+  if (r.right > r.vw || r.h > r.vh) throw new Error(JSON.stringify(r));
+  await phone.keyboard.press('Escape');
+});
+
+// ---------- accessibility (axe-core) ----------
+async function axe(p, label) {
+  await p.addScriptTag({ url: 'https://cdn.jsdelivr.net/npm/axe-core@4.14.0/axe.min.js' });
+  const res = await p.evaluate(async () => (await window.axe.run(document, { resultTypes: ['violations'] })).violations
+    .filter((v) => ['serious', 'critical'].includes(v.impact))
+    .map((v) => `${v.impact} ${v.id} (${v.nodes.length}): ${v.nodes.slice(0, 2).map((n) => n.target.join(' ')).join(', ')}`));
+  if (res.length) { for (const r of res) info(`a11y ${label}`, r); throw new Error(`${res.length} serious/critical accessibility problems (listed above)`); }
+}
+await step('accessibility: home', async () => { await page.goto(SITE + '/#/home'); await page.waitForSelector('.hero'); await axe(page, 'home'); });
+await step('accessibility: article list with an open article', async () => {
+  await page.goto(SITE + '/#/all'); await page.reload(); await page.waitForSelector('article.entry');
+  await page.click('article.entry .row'); await page.waitForSelector('.body .actions');
+  await axe(page, 'list');
+});
+await step('accessibility: Settings', async () => {
+  await page.click('#settingsBtn'); await page.waitForTimeout(300);
+  await axe(page, 'settings');
+  await page.keyboard.press('Escape');
+});
+await step('accessibility: dark theme contrast', async () => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.goto(SITE + '/#/all'); await page.reload(); await page.waitForSelector('article.entry');
+  await axe(page, 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
+});
+
 if (pageErrors.length) fail('no page errors', pageErrors.slice(0, 5).join(' | '));
 else pass('no page errors');
 
