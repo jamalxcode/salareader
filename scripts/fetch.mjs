@@ -211,7 +211,8 @@ async function main() {
         const itemId = sha(`${f.url}|${p.guid}`);
         const existing = map.get(itemId);
         // Undated items keep their first-seen time; idx keeps feed order stable.
-        const date = Number.isFinite(p.date) ? p.date : existing?.d ?? now - idx * 1000;
+        // Future dates (wrong time zones) are capped at the time we first saw the item.
+        const date = Number.isFinite(p.date) && p.date <= now ? p.date : existing?.d ?? (Number.isFinite(p.date) ? now : now - idx * 1000);
         map.set(itemId, {
           id: itemId, f: id, t: p.title, l: p.link,
           d: date, s: stripTags(p.html).slice(0, 280),
