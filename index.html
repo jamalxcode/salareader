@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="style.css">
 <script>
   // Apply the saved theme before first paint.
-  try { var t = JSON.parse(localStorage.getItem('sr.settings') || '{}').theme; if (t && t !== 'auto') document.documentElement.dataset.theme = t; } catch (e) {}
+  try { var t = localStorage.getItem('sr.theme'); if (t && t !== 'auto') document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
 </head>
 <body>
@@ -47,9 +47,14 @@
     <label>Feed or website address<input id="addUrl" type="text" inputmode="url" placeholder="https://example.com or its RSS feed" required></label>
     <label>Folder<input id="addFolder" type="text" list="folderList" placeholder="e.g. Tech"></label>
     <datalist id="folderList"></datalist>
-    <p class="hint">It's saved in this browser and fetched straight away. To have the GitHub Action fetch it on every update and keep its history, also add it to <a id="editFeedsLink" target="_blank" rel="noopener">feeds.json</a>.</p>
+    <p class="hint">Your subscriptions are saved only on this device. This page fetches the feed straight from its site, or through your own relay if the site blocks web pages (⚙ Settings → Your feeds).</p>
     <p id="addStatus" class="status" aria-live="polite"></p>
-    <div class="buttons"><button value="cancel" formnovalidate class="ghost">Cancel</button><button id="addSubmit" value="ok" class="primary">Subscribe</button></div>
+    <div class="buttons"><button value="cancel" formnovalidate class="ghost">Close</button><button id="addSubmit" value="ok" class="primary">Subscribe</button></div>
+    <section id="discover" hidden>
+      <h3>From the catalog</h3>
+      <p class="hint">Shared feeds the site already fetches. Adding one tells no one.</p>
+      <ul id="discoverList" class="discover"></ul>
+    </section>
   </form>
 </dialog>
 
@@ -105,13 +110,37 @@
       <div class="buttons left"><button type="button" id="listModelsBtn" class="ghost">Show available models</button><span id="modelStatus" class="status"></span></div>
     </section>
     <section>
-      <h3>Subscriptions</h3>
+      <h3>Your feeds</h3>
+      <p class="hint">Most sites don't let web pages read their feeds. For those, Sala Reader uses <b>your own relay</b>: a tiny Cloudflare Worker you run on your free Cloudflare account, which keeps no logs. Public relays are never used. <a href="https://github.com/jamalxcode/salareader#your-own-relay" target="_blank" rel="noopener">Set one up (5 minutes)</a></p>
+      <label>Relay address<input id="relayInput" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://salareader-relay.yourname.workers.dev"></label>
+      <label>Relay token (optional)<input id="relayToken" type="password" autocomplete="off" spellcheck="false" placeholder="The TOKEN secret you set on the Worker"></label>
+      <div class="buttons left"><button type="button" id="testRelay" class="ghost">Test relay</button><span id="relayStatus" class="status"></span></div>
+    </section>
+    <section>
+      <h3>Backup and moving devices</h3>
+      <p class="hint">Everything is stored only on this device. Export a backup file and import it on another device to move your subscriptions, folders, read and starred articles, topics and settings.</p>
+      <label class="check"><input type="checkbox" id="includeKeys"> Include my API keys and relay token (keep the file private)</label>
+      <div class="buttons left">
+        <button type="button" id="exportBackup" class="ghost">Export backup</button>
+        <label class="button ghost">Import backup<input id="backupFile" type="file" accept=".json,application/json" hidden></label>
+      </div>
+      <p class="hint">Subscriptions only, for other readers like Feedly or Inoreader:</p>
       <div class="buttons left">
         <label class="button ghost">Import OPML<input id="opmlFile" type="file" accept=".opml,.xml,text/xml" hidden></label>
         <button type="button" id="exportOpml" class="ghost">Export OPML</button>
-        <button type="button" id="exportFeeds" class="ghost">Download feeds.json</button>
       </div>
-      <p class="hint">Import your subscriptions from Feedly, Inoreader or any reader. To make them permanent, download feeds.json and replace the one in the repo.</p>
+    </section>
+    <section>
+      <h3>Privacy</h3>
+      <p class="hint">Sala Reader has no accounts and no server-side storage. Here is everything that leaves this device:</p>
+      <ul class="privacy">
+        <li><b>The shared catalog</b> comes from this site. Everyone downloads the same files, so the site can't tell which feeds you follow or what you read.</li>
+        <li><b>Your own feeds</b> are fetched from the feed's site, or through your relay.</li>
+        <li><b>Images in articles</b> load from their own sites when you open an article, with no referrer.</li>
+        <li><b>The AI search model</b> is downloaded once from jsDelivr and Hugging Face. Searches run on this device.</li>
+        <li><b>✨ Summarize and ✨ Brief me</b> send that article or those headlines to the AI assistant you chose, only when you press them.</li>
+        <li><b>A visit counter</b> (GoatCounter, no cookies) counts page visits. It never sees your feeds, articles or searches.</li>
+      </ul>
     </section>
     <section>
       <h3>Updates</h3>
@@ -119,7 +148,7 @@
     </section>
     <section>
       <h3>Reset</h3>
-      <div class="buttons left"><button type="button" id="resetRead" class="ghost danger">Mark everything unread</button></div>
+      <div class="buttons left"><button type="button" id="resetRead" class="ghost danger">Mark everything unread</button><button type="button" id="eraseAll" class="ghost danger">Erase all data on this device</button></div>
     </section>
     <div class="buttons"><button value="ok" class="primary">Done</button></div>
   </form>
@@ -157,7 +186,7 @@
 <script>
   (function () {
     if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
-    window.goatcounter = { endpoint: 'https://salacompany.goatcounter.com/count', path: function (p) { return location.host + p; } };
+    window.goatcounter = { endpoint: 'https://salacompany.goatcounter.com/count', path: function (p) { return location.host + p.split('?')[0]; } }; // Sala Reader: never send the query (it can hold a sign-in code)
     var s = document.createElement('script');
     s.async = true;
     s.src = 'https://gc.zgo.at/count.js';

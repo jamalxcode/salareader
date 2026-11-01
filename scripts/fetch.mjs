@@ -2,13 +2,14 @@
 // run's data, adds a meaning vector to each new item (for AI search), and
 // writes the result to data/:
 //   data/index.json          feeds + light item list (what the page loads first)
-//   data/content/<feed>.json full article HTML per feed (loaded when you open one)
+//   data/content.json        full article HTML for every feed, in one file, so the
+//                            server can't tell which feeds a reader opens
 //   data/vectors.json        one int8 vector per item, base64 (loaded for AI search)
 //
 // Env: FEEDS_FILE (default feeds.json), DATA_DIR (default data),
 //      SKIP_EMBED=1 to skip the AI vectors, MODEL_CACHE for the model files.
 
-import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { XMLParser } from 'fast-xml-parser';
@@ -186,9 +187,11 @@ async function main() {
   for (const f of config.feeds || []) wanted.push({ ...f, folder: f.folder || '' });
 
   const content = {}; // feedId -> {itemId: html}
+  const prevContent = await readJSON(path.join(DATA_DIR, 'content.json'), {});
   for (const f of wanted) {
     const id = sha(f.url, 8);
-    content[id] = await readJSON(path.join(DATA_DIR, 'content', `${id}.json`), {});
+    // Older runs kept one file per feed.
+    content[id] = { ...(await readJSON(path.join(DATA_DIR, 'content', `${id}.json`), {})), ...prevContent };
   }
 
   const itemsByFeed = new Map();
@@ -254,16 +257,11 @@ async function main() {
     }
   }
 
-  await mkdir(path.join(DATA_DIR, 'content'), { recursive: true });
-  const feedIds = new Set(feeds.map((x) => x.feed.id));
-  for (const id of feedIds) {
-    const c = {};
-    for (const [k, v] of Object.entries(content[id] || {})) if (keepIds.has(k)) c[k] = v;
-    await writeFile(path.join(DATA_DIR, 'content', `${id}.json`), JSON.stringify(c));
-  }
-  for (const file of await readdir(path.join(DATA_DIR, 'content'))) {
-    if (!feedIds.has(file.replace(/\.json$/, ''))) await rm(path.join(DATA_DIR, 'content', file));
-  }
+  await mkdir(DATA_DIR, { recursive: true });
+  const allContent = {};
+  for (const c of Object.values(content)) for (const [k, v] of Object.entries(c)) if (keepIds.has(k)) allContent[k] = v;
+  await writeFile(path.join(DATA_DIR, 'content.json'), JSON.stringify(allContent));
+  await rm(path.join(DATA_DIR, 'content'), { recursive: true, force: true });
   await writeFile(path.join(DATA_DIR, 'vectors.json'), JSON.stringify({ model: MODEL, dim: 384, v: vectors }));
   await writeFile(path.join(DATA_DIR, 'index.json'), JSON.stringify({
     updated: now,

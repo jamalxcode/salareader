@@ -1,55 +1,162 @@
 // Sala Reader: a Google Reader-style RSS reader with AI search.
-// Data comes from data/ (built by scripts/fetch.mjs in a GitHub Action);
-// read/starred state, AI topics and extra feeds live in this browser.
+//
+// Privacy: everything about the reader (subscriptions, folders, read and
+// starred articles, topics, settings, keys) is stored only on this device,
+// in IndexedDB. The site serves one shared catalog of feeds (data/), the
+// same files for everyone, so it can't tell what anyone follows or reads.
+// Feeds you add yourself are fetched by this page, straight from the feed's
+// site or through your own relay (relay/worker.js). Backup → export/import
+// moves everything to another device.
 
 import { decodeVector, dot, embed, embedText, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
-const REPO = 'jamalxcode/salareader';
-const PROXIES = [
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-];
 const PAGE = 60;
+const OWN_ITEMS_PER_FEED = 80;
 
-// ---------- storage ----------
+// ---------- storage: IndexedDB on this device ----------
+// A synchronous in-memory copy for the app, written back to IndexedDB
+// shortly after each change (localStorage if IndexedDB isn't available).
+
+const DB_NAME = 'salareader';
+const KV = 'kv';
+const cache = new Map();
+const dirty = new Set();
+let dbPromise = null;
+let useLocalStorage = false;
+let flushTimer;
+
+function openDB() {
+  dbPromise ??= new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(KV);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('blocked'));
+  });
+  return dbPromise;
+}
+
+async function loadStore() {
+  try {
+    const db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(KV, 'readonly');
+      const req = tx.objectStore(KV).openCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (c) { cache.set(c.key, c.value); c.continue(); } else resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    useLocalStorage = true;
+  }
+  // Move data from older versions (and the localStorage fallback) into the cache.
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith('sr.') || k === 'sr.theme') continue;
+      const key = k.slice(3);
+      if (!cache.has(key)) { cache.set(key, JSON.parse(localStorage.getItem(k))); dirty.add(key); }
+      if (!useLocalStorage) localStorage.removeItem(k);
+    }
+  } catch { /* storage blocked */ }
+  if (dirty.size) scheduleFlush();
+  // Ask the browser not to clear this data when space runs low.
+  navigator.storage?.persist?.().catch(() => {});
+}
+
+async function flush() {
+  clearTimeout(flushTimer);
+  if (!dirty.size) return;
+  const keys = [...dirty];
+  dirty.clear();
+  if (useLocalStorage) {
+    for (const k of keys) {
+      try { if (cache.has(k)) localStorage.setItem('sr.' + k, JSON.stringify(cache.get(k))); else localStorage.removeItem('sr.' + k); } catch { /* full */ }
+    }
+    return;
+  }
+  try {
+    const db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(KV, 'readwrite');
+      const os = tx.objectStore(KV);
+      for (const k of keys) { if (cache.has(k)) os.put(cache.get(k), k); else os.delete(k); }
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn('Saving failed', e);
+    keys.forEach((k) => dirty.add(k));
+  }
+}
+function scheduleFlush() { clearTimeout(flushTimer); flushTimer = setTimeout(flush, 300); }
+addEventListener('pagehide', flush);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
 const store = {
-  get(key, fallback) {
-    try { const v = localStorage.getItem('sr.' + key); return v == null ? fallback : JSON.parse(v); } catch { return fallback; }
-  },
-  set(key, value) {
-    try { localStorage.setItem('sr.' + key, JSON.stringify(value)); } catch { /* full or blocked */ }
-  },
+  // structuredClone keeps the stored copy separate from objects the app keeps changing.
+  get(key, fallback) { return cache.has(key) ? structuredClone(cache.get(key)) : fallback; },
+  set(key, value) { cache.set(key, structuredClone(value)); dirty.add(key); scheduleFlush(); },
+  del(key) { cache.delete(key); dirty.add(key); scheduleFlush(); },
+  keys() { return [...cache.keys()]; },
 };
+
+const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, relay: '', relayToken: '' };
 
 const S = {
   index: { feeds: [], items: [], updated: 0 },
-  feeds: [],            // server + local feeds
+  feeds: [],            // your subscriptions (catalog + your own)
   feedById: new Map(),
-  items: [],            // server + local items, newest first
+  items: [],            // their items, newest first
   byId: new Map(),
-  content: new Map(),   // feedId -> Promise<{id: html}>
+  content: null,        // Promise<{itemId: html}> for the catalog
   vectors: new Map(),   // itemId -> Float32Array
   vectorsState: 'none', // none | loading | ready | missing
-  read: store.get('read', {}),         // id -> time read
-  starred: store.get('starred', {}),   // id -> item copy (survives feed cleanup)
-  topics: store.get('topics', []),     // {id, name, query, qv: number[]}
-  localFeeds: store.get('localFeeds', []),
-  localItems: store.get('localItems', {}), // feedId -> items[]
-  collapsed: store.get('collapsed', {}),
-  days: store.get('days', []),         // days you read something (YYYY-MM-DD)
-  settings: { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, ...store.get('settings', {}) },
+  subs: null,           // [{id, url, title, folder, own?, site?, error?, ok?}] (null until first run)
+  ownItems: {},         // feedId -> items[] for feeds this page fetches itself
+  read: {},             // id -> time read
+  starred: {},          // id -> item copy (survives feed cleanup)
+  topics: [],           // {id, name, query, qv: number[]}
+  collapsed: {},
+  days: [],             // days you read something (YYYY-MM-DD)
+  settings: { ...DEFAULT_SETTINGS },
   view: { type: 'home' },
   list: [],
   shown: 0,
   cur: -1,
   scores: null,         // id -> score (search / topic views)
 };
+
+function loadState() {
+  S.subs = store.get('subs', null);
+  S.ownItems = store.get('ownItems', {});
+  S.read = store.get('read', {});
+  S.starred = store.get('starred', {});
+  S.topics = store.get('topics', []);
+  S.collapsed = store.get('collapsed', {});
+  S.days = store.get('days', []);
+  S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
+  // Earlier versions had only Claude.
+  if (S.settings.claudeKey) S.settings.keys = { ...S.settings.keys, anthropic: S.settings.keys?.anthropic || S.settings.claudeKey };
+  if (S.settings.claudeModel) S.settings.models = { ...S.settings.models, anthropic: S.settings.models?.anthropic || S.settings.claudeModel };
+  if ('claudeKey' in S.settings || 'claudeModel' in S.settings) {
+    delete S.settings.claudeKey; delete S.settings.claudeModel;
+    saveSettings();
+  }
+  // Earlier versions kept browser-added feeds separately.
+  const oldFeeds = store.get('localFeeds', null);
+  if (oldFeeds) {
+    S.subs = S.subs || null;
+    S.pendingOwn = oldFeeds.map((f) => ({ id: f.id, url: f.url, title: f.title, folder: f.folder || '', own: true, site: f.site || '' }));
+    S.ownItems = { ...store.get('localItems', {}), ...S.ownItems };
+    store.del('localFeeds'); store.del('localItems');
+  }
+}
 const saveSettings = () => store.set('settings', S.settings);
-// Earlier versions had only Claude.
-if (S.settings.claudeKey) { S.settings.keys = { ...S.settings.keys, anthropic: S.settings.keys?.anthropic || S.settings.claudeKey }; }
-if (S.settings.claudeModel) { S.settings.models = { ...S.settings.models, anthropic: S.settings.models?.anthropic || S.settings.claudeModel }; }
-delete S.settings.claudeKey; delete S.settings.claudeModel;
+const saveSubs = () => store.set('subs', S.subs);
+const saveOwnItems = () => store.set('ownItems', S.ownItems);
 const ai = () => {
   const p = provider(S.settings.aiProvider);
   return { p, key: S.settings.keys[p.id] || '', model: S.settings.models[p.id] || 'auto' };
@@ -62,7 +169,13 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const hash = (s) => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16).padStart(8, '0'); };
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
-const favicon = (f) => { const h = host(f?.site || f?.url || ''); return h ? `https://www.google.com/s2/favicons?domain=${h}&sz=32` : ''; };
+/** A letter icon drawn on the device (no favicon service learns what you follow). */
+function avatar(f, big = false) {
+  const name = (f?.title || host(f?.url) || '?').replace(/^the\s+/i, '');
+  const letter = (name.match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase();
+  const hue = parseInt(hash(f?.url || name).slice(0, 4), 16) % 360;
+  return `<span class="fav av${big ? ' big' : ''}" style="--h:${hue}" aria-hidden="true">${esc(letter)}</span>`;
+}
 const isRead = (id) => id in S.read;
 const strip = (html) => { const d = document.createElement('div'); d.innerHTML = DOMPurifySafe(html); return (d.textContent || '').replace(/\s+/g, ' ').trim(); };
 function DOMPurifySafe(html) { return window.DOMPurify ? window.DOMPurify.sanitize(html) : String(html).replace(/<[^>]+>/g, ' '); }
@@ -87,7 +200,7 @@ function toast(msg, ms = 2600) {
   toastTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
 
-// ---------- loading data ----------
+// ---------- the shared catalog ----------
 
 async function loadIndex(bust) {
   try {
@@ -97,17 +210,29 @@ async function loadIndex(bust) {
   } catch {
     S.index = { feeds: [], items: [], updated: 0, missing: true };
   }
-  S.content.clear();
+  S.content = null;
+  // First visit: start with every catalog feed (you can unsubscribe any).
+  if (!S.subs && S.index.feeds.length) {
+    S.subs = S.index.feeds.map((f) => ({ id: f.id, url: f.url, title: f.title, folder: f.folder || '' }));
+    if (S.pendingOwn) S.subs.push(...S.pendingOwn.filter((o) => !S.subs.some((s) => s.url === o.url)));
+    saveSubs();
+  }
   rebuild();
 }
 
+const catalogByUrl = () => new Map(S.index.feeds.map((f) => [f.url, f]));
+
 function rebuild() {
-  const local = S.localFeeds.map((f) => ({ ...f, local: true }));
-  const serverUrls = new Set(S.index.feeds.map((f) => f.url));
-  S.feeds = [...S.index.feeds, ...local.filter((f) => !serverUrls.has(f.url))];
+  const catalog = catalogByUrl();
+  S.feeds = (S.subs || S.pendingOwn || []).map((s) => {
+    const c = catalog.get(s.url);
+    // Catalog feeds come from the shared data; the rest is fetched by this page.
+    return c ? { ...c, title: s.title || c.title, folder: s.folder ?? c.folder } : Object.assign(s, { own: true });
+  });
   S.feedById = new Map(S.feeds.map((f) => [f.id, f]));
-  const localItems = local.filter((f) => !serverUrls.has(f.url)).flatMap((f) => S.localItems[f.id] || []);
-  S.items = [...S.index.items, ...localItems].sort((a, b) => b.d - a.d);
+  const catIds = new Set(S.feeds.filter((f) => !f.own).map((f) => f.id));
+  const own = S.feeds.filter((f) => f.own).flatMap((f) => S.ownItems[f.id] || []);
+  S.items = [...S.index.items.filter((i) => catIds.has(i.f)), ...own].sort((a, b) => b.d - a.d);
   S.byId = new Map(S.items.map((i) => [i.id, i]));
   // Forget read marks for items that are long gone.
   const cutoff = Date.now() - 90 * 864e5;
@@ -116,15 +241,12 @@ function rebuild() {
   if (changed) store.set('read', S.read);
 }
 
-function feedContent(feedId) {
-  if (!S.content.has(feedId)) {
-    const feed = S.feedById.get(feedId);
-    const p = feed?.local
-      ? Promise.resolve(Object.fromEntries((S.localItems[feedId] || []).map((i) => [i.id, i.c || ''])))
-      : fetch(`data/content/${feedId}.json?u=${S.index.updated}`).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
-    S.content.set(feedId, p);
-  }
-  return S.content.get(feedId);
+async function feedContent(feedId) {
+  const feed = S.feedById.get(feedId);
+  if (feed?.own) return Object.fromEntries((S.ownItems[feedId] || []).map((i) => [i.id, i.c || '']));
+  // One file with every catalog article, so the server can't tell which feeds you read.
+  S.content ??= fetch(`data/content.json?u=${S.index.updated}`).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+  return S.content;
 }
 
 async function loadVectors() {
@@ -153,18 +275,28 @@ async function ensureVectors(items, onProgress) {
   todo.forEach((it, k) => S.vectors.set(it.id, vecs[k]));
 }
 
-// ---------- local (browser-fetched) feeds ----------
+// ---------- your own feeds (fetched by this page) ----------
 
-async function fetchViaProxy(url) {
-  let lastErr;
-  for (const p of PROXIES) {
-    try {
-      const res = await fetch(p(url), { signal: AbortSignal.timeout(15000) });
-      if (res.ok) return await res.text();
-      lastErr = new Error(`HTTP ${res.status}`);
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr || new Error('Could not fetch');
+class NeedsRelay extends Error {}
+
+/** Fetches a feed straight from its site, or through your own relay. Never a public proxy. */
+async function fetchFeedText(url, { relayOnly = false } = {}) {
+  if (!relayOnly) try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000), credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
+    if (res.ok) return await res.text();
+  } catch { /* the site doesn't let web pages read it: try the relay */ }
+  const relay = S.settings.relay.trim().replace(/\/+$/, '');
+  if (!relay) throw new NeedsRelay("This site doesn't let web pages read its feed. Set up your own relay in ⚙ Settings → Your feeds to add it.");
+  const res = await fetch(`${relay}/?url=${encodeURIComponent(url)}`, {
+    signal: AbortSignal.timeout(20000),
+    credentials: 'omit',
+    referrerPolicy: 'no-referrer',
+    headers: S.settings.relayToken ? { 'X-Relay-Token': S.settings.relayToken } : {},
+  }).catch(() => { throw new Error("Couldn't reach your relay. Check its address in ⚙ Settings."); });
+  if (res.status === 401) throw new Error('Your relay rejected the token. Check it in ⚙ Settings.');
+  if (res.status === 403) throw new Error("Your relay doesn't allow this site. Check ALLOWED_ORIGIN in the Worker.");
+  if (!res.ok) throw new Error(`The feed answered HTTP ${res.status}`);
+  return res.text();
 }
 
 function parseFeedXML(xml, feedUrl, feedId) {
@@ -191,7 +323,7 @@ function parseFeedXML(xml, feedUrl, feedId) {
     const link = abs(linkOf(el), site || feedUrl);
     const guid = txt(el, 'guid', 'id') || link;
     let d = Date.parse(txt(el, 'pubDate', 'published', 'updated', 'dc:date', 'date'));
-    if (!Number.isFinite(d) || d > Date.now() + 864e5) d = Date.now() - idx * 1000;
+    if (!Number.isFinite(d) || d > Date.now()) d = NaN;
     const media = [...el.getElementsByTagName('*')].find((c) => /^(thumbnail|content)$/.test(c.localName) && c.getAttribute('url') && /image|^$/.test(c.getAttribute('medium') || c.getAttribute('type') || ''));
     const imgMatch = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
     const img = media?.getAttribute('url') || (imgMatch ? imgMatch[1] : '');
@@ -200,7 +332,8 @@ function parseFeedXML(xml, feedUrl, feedId) {
       f: feedId,
       t: strip(txt(el, 'title')) || '(untitled)',
       l: link,
-      d,
+      d: Number.isFinite(d) ? d : Date.now() - idx * 1000,
+      dated: Number.isFinite(d),
       s: strip(html).slice(0, 280),
       ...(img ? { i: abs(img, link) } : {}),
       c: html.slice(0, 40000),
@@ -211,18 +344,22 @@ function parseFeedXML(xml, feedUrl, feedId) {
 
 function discoverFeed(html, pageUrl) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  const link = doc.querySelector('link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"], link[rel="alternate"][type="application/feed+json"]');
+  const link = doc.querySelector('link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]');
   if (!link) return '';
   try { return new URL(link.getAttribute('href'), pageUrl).href; } catch { return ''; }
 }
 
-async function fetchLocalFeed(feed) {
-  const xml = await fetchViaProxy(feed.url);
+async function fetchOwnFeed(feed, xml) {
+  xml ??= await fetchFeedText(feed.url);
   const parsed = parseFeedXML(xml, feed.url, feed.id);
   if (!parsed) throw new Error('Not an RSS or Atom feed');
-  const old = new Map((S.localItems[feed.id] || []).map((i) => [i.id, i]));
-  for (const it of parsed.items) old.set(it.id, { ...old.get(it.id), ...it, d: old.get(it.id)?.d ?? it.d });
-  S.localItems[feed.id] = [...old.values()].sort((a, b) => b.d - a.d).slice(0, 80);
+  const old = new Map((S.ownItems[feed.id] || []).map((i) => [i.id, i]));
+  for (const it of parsed.items) {
+    const prev = old.get(it.id);
+    // Undated items keep the time we first saw them.
+    old.set(it.id, { ...prev, ...it, d: it.dated ? it.d : prev?.d ?? it.d });
+  }
+  S.ownItems[feed.id] = [...old.values()].sort((a, b) => b.d - a.d).slice(0, OWN_ITEMS_PER_FEED);
   feed.site = parsed.site || feed.site;
   if (!feed.titleSet && parsed.title) feed.title = parsed.title;
   feed.ok = Date.now();
@@ -230,35 +367,63 @@ async function fetchLocalFeed(feed) {
   return parsed;
 }
 
-async function refreshLocalFeeds() {
-  await Promise.all(S.localFeeds.map(async (f) => {
-    try { await fetchLocalFeed(f); } catch (e) { f.error = e.message || 'Could not fetch'; }
-  }));
-  store.set('localFeeds', S.localFeeds);
-  store.set('localItems', S.localItems);
+async function refreshOwnFeeds() {
+  const own = (S.subs || []).filter((s) => !catalogByUrl().has(s.url));
+  for (let i = 0; i < own.length; i += 4) {
+    await Promise.all(own.slice(i, i + 4).map(async (f) => {
+      try { await fetchOwnFeed(f); } catch (e) { f.error = e.message || 'Could not fetch'; }
+    }));
+  }
+  if (own.length) { saveSubs(); saveOwnItems(); }
+}
+
+function subscribeCatalog(c, folder) {
+  S.subs ??= [];
+  if (S.subs.some((s) => s.url === c.url)) return;
+  S.subs.push({ id: c.id, url: c.url, title: c.title, folder: folder ?? c.folder ?? '' });
+  saveSubs();
+  rebuild();
 }
 
 async function addFeed(url, folder) {
   url = url.trim();
   if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
   const status = $('#addStatus');
+  const already = () => { throw new Error("You're already subscribed to this feed."); };
+  if (S.feeds.some((f) => f.url === url)) already();
+  const inCatalog = catalogByUrl().get(url);
+  if (inCatalog) { subscribeCatalog(inCatalog, folder.trim() || inCatalog.folder); return S.feedById.get(inCatalog.id); }
   status.textContent = 'Looking for the feed…';
-  let text = await fetchViaProxy(url);
+  let text = await fetchFeedText(url);
   let feedUrl = url;
   if (!parseFeedXML(text, url, 'x')) {
     const found = discoverFeed(text, url);
     if (!found) throw new Error("This page doesn't list an RSS or Atom feed. Try the feed's own address.");
     feedUrl = found;
     status.textContent = `Found ${feedUrl}`;
+    if (S.feeds.some((f) => f.url === feedUrl)) already();
+    const c = catalogByUrl().get(feedUrl);
+    if (c) { subscribeCatalog(c, folder.trim() || c.folder); return S.feedById.get(c.id); }
+    text = await fetchFeedText(feedUrl);
   }
-  if (S.feeds.some((f) => f.url === feedUrl)) throw new Error("You're already subscribed to this feed.");
-  const feed = { id: 'L' + hash(feedUrl), url: feedUrl, title: host(feedUrl), folder: folder.trim(), site: '', local: true };
-  await fetchLocalFeed(feed);
-  S.localFeeds.push(feed);
-  store.set('localFeeds', S.localFeeds);
-  store.set('localItems', S.localItems);
+  const feed = { id: 'L' + hash(feedUrl), url: feedUrl, title: host(feedUrl), folder: folder.trim(), own: true, site: '' };
+  await fetchOwnFeed(feed, text);
+  S.subs ??= [];
+  S.subs.push(feed);
+  saveSubs();
+  saveOwnItems();
   rebuild();
   return feed;
+}
+
+function unsubscribe(id) {
+  const f = S.feedById.get(id);
+  if (!f) return;
+  S.subs = S.subs.filter((s) => s.url !== f.url);
+  delete S.ownItems[id];
+  saveSubs();
+  saveOwnItems();
+  rebuild();
 }
 
 // ---------- read state, stars, streak ----------
@@ -506,7 +671,7 @@ function renderSidebar() {
   for (const name of names) {
     const list = folders.get(name).sort((a, b) => a.title.localeCompare(b.title));
     const feedRow = (f) => `<a class="nav-item feed${active('feed', f.id)}${f.error ? ' broken' : ''}" href="#/feed/${f.id}" title="${esc(f.error ? `Couldn't fetch: ${f.error}` : f.url)}">
-        <img class="fav" src="${esc(favicon(f))}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"><span class="name">${esc(f.title)}</span>${f.error ? '<span class="warn" aria-label="Fetch problem">!</span>' : ''}${count(unreadByFeed.get(f.id) || 0)}</a>`;
+        ${avatar(f)}<span class="name">${esc(f.title)}</span>${f.error ? '<span class="warn" aria-label="Fetch problem">!</span>' : ''}${count(unreadByFeed.get(f.id) || 0)}</a>`;
     if (!name) { html += list.map(feedRow).join(''); continue; }
     const n = list.reduce((s, f) => s + (unreadByFeed.get(f.id) || 0), 0);
     const closed = S.collapsed[name];
@@ -514,7 +679,7 @@ function renderSidebar() {
       <div class="nav-item folder-row${active('folder', name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(name)}">▾</button><a href="#/folder/${encodeURIComponent(name)}" class="name">📁 ${esc(name)}</a>${count(n)}</div>
       <div class="folder-feeds">${list.map(feedRow).join('')}</div></div>`;
   }
-  if (!S.feeds.length) html += `<p class="nav-note">No feeds yet. Add one above, or list them in feeds.json.</p>`;
+  if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
   html += `<p class="nav-note">${S.index.updated ? `Updated ${agoText(S.index.updated)}` : S.index.missing ? 'Waiting for the first feed update' : ''} · <button class="linkish" data-act="refresh">Refresh</button></p>`;
   nav.innerHTML = html;
 }
@@ -545,7 +710,7 @@ function renderHeader() {
   const filterable = !['starred', 'search'].includes(v.type);
   h.innerHTML = `
     <div class="vh-title">
-      <h1>${feed ? `<img class="fav big" src="${esc(favicon(feed))}" alt="" onerror="this.remove()">` : ''}${esc(viewTitle())}</h1>
+      <h1>${feed ? avatar(feed, true) : ''}${esc(viewTitle())}</h1>
       <p class="sub">${esc(headerSub())}</p>
     </div>
     <div class="vh-actions">
@@ -555,8 +720,7 @@ function renderHeader() {
       <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
-      ${feed?.local ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
-      ${feed && !feed.local ? `<a class="button ghost" href="https://github.com/${REPO}/edit/main/feeds.json" target="_blank" rel="noopener" title="Feeds fetched on the server are listed in feeds.json">Edit feeds.json</a>` : ''}
+      ${feed ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
     </div>
     <div class="brief" id="brief" hidden></div>`;
 }
@@ -570,7 +734,7 @@ function entryHTML(it, idx) {
   return `<article class="entry${read ? ' read' : ''}${expanded ? ' expanded' : ''}" data-id="${esc(it.id)}" data-idx="${idx}">
     <div class="row" role="button" tabindex="-1">
       <button class="star${star ? ' on' : ''}" data-act="star" aria-label="${star ? 'Unstar' : 'Star'}" title="Star (s)">${star ? '★' : '☆'}</button>
-      <span class="src"><img class="fav" src="${esc(favicon(f))}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">${esc(f?.title || '')}</span>
+      <span class="src">${avatar(f)}${esc(f?.title || '')}</span>
       <span class="line"><span class="t">${esc(it.t)}</span><span class="snip"> – ${esc(it.s)}</span></span>
       ${score != null && score < 0.99 ? `<span class="match" title="How closely this matches">${Math.round(Math.min(score, 1) * 100)}%</span>` : ''}
       <time datetime="${new Date(it.d).toISOString()}" title="${esc(new Date(it.d).toLocaleString())}">${ago(it.d)}</time>
@@ -943,7 +1107,11 @@ function openSettings() {
   renderAISettings();
   $('#thresholdRange').value = S.settings.threshold;
   $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`;
-  $('#updatesInfo').innerHTML = `Feeds are fetched by a GitHub Action whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} <a href="https://github.com/${REPO}/actions" target="_blank" rel="noopener">See runs</a> · <a href="https://github.com/${REPO}#updates-with-cron-joborg" target="_blank" rel="noopener">Setup</a>`;
+  $('#updatesInfo').innerHTML = `The starter catalog is refreshed on GitHub whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} Your own feeds are fetched by this page when you open it, and every 30 minutes while it's open.`;
+  $('#relayInput').value = S.settings.relay;
+  $('#relayToken').value = S.settings.relayToken;
+  $('#relayStatus').textContent = '';
+  $('#includeKeys').checked = false;
   if (!d.open) d.showModal();
 }
 
@@ -968,6 +1136,7 @@ function renderAISettings() {
 
 function applyTheme() {
   const t = S.settings.theme;
+  try { localStorage.setItem('sr.theme', t); } catch { /* blocked: the theme just applies a moment later */ }
   if (t === 'auto') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = t;
 }
@@ -989,19 +1158,40 @@ function exportOPML() {
   download('salareader.opml', `<?xml version="1.0" encoding="UTF-8"?>\n<opml version="2.0">\n  <head><title>Sala Reader subscriptions</title></head>\n  <body>\n${body}\n  </body>\n</opml>\n`, 'text/x-opml');
 }
 
-function exportFeedsJSON() {
-  const folders = new Map();
-  const loose = [];
-  for (const f of S.feeds) {
-    const entry = { title: f.title, url: f.url };
-    if (!f.folder) { loose.push(entry); continue; }
-    if (!folders.has(f.folder)) folders.set(f.folder, []);
-    folders.get(f.folder).push(entry);
-  }
-  const out = { folders: [...folders].map(([name, feeds]) => ({ name, feeds })) };
-  if (loose.length) out.feeds = loose;
-  download('feeds.json', JSON.stringify(out, null, 2) + '\n', 'application/json');
-  toast('Replace feeds.json in the repo with this file to make it permanent', 5000);
+// ---------- backup: move everything to another device ----------
+
+const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'collapsed', 'days', 'settings', 'ownItems'];
+
+async function exportBackup(includeKeys) {
+  await flush();
+  const data = {};
+  for (const k of BACKUP_KEYS) if (store.get(k) !== undefined) data[k] = store.get(k);
+  if (data.settings && !includeKeys) { data.settings = { ...data.settings, keys: {}, relayToken: '' }; }
+  const backup = { app: 'salareader', version: 1, exported: new Date().toISOString(), includesKeys: !!includeKeys, data };
+  download(`salareader-backup-${today()}.json`, JSON.stringify(backup), 'application/json');
+  toast(includeKeys ? 'Backup saved, including your API keys: keep the file private' : 'Backup saved (API keys left out)', 4000);
+}
+
+async function importBackup(file) {
+  let backup;
+  try { backup = JSON.parse(await file.text()); } catch { throw new Error("That file isn't a Sala Reader backup."); }
+  if (backup?.app !== 'salareader' || typeof backup.data !== 'object') throw new Error("That file isn't a Sala Reader backup.");
+  const n = backup.data.subs?.length ?? 0;
+  if (!confirm(`Replace everything on this device with the backup from ${new Date(backup.exported).toLocaleString()} (${n} subscription${n === 1 ? '' : 's'})?`)) return false;
+  const keepKeys = S.settings.keys;
+  const keepRelayToken = S.settings.relayToken;
+  for (const k of BACKUP_KEYS) store.del(k);
+  for (const k of BACKUP_KEYS) if (k in backup.data) store.set(k, backup.data[k]);
+  // A backup without keys keeps the keys already on this device.
+  if (!backup.includesKeys) store.set('settings', { ...store.get('settings', {}), keys: keepKeys, relayToken: keepRelayToken });
+  await flush();
+  return true;
+}
+
+async function eraseEverything() {
+  for (const k of store.keys()) store.del(k);
+  await flush();
+  try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k?.startsWith('sr.')) localStorage.removeItem(k); } } catch { /* blocked */ }
 }
 
 async function importOPML(file) {
@@ -1013,12 +1203,19 @@ async function importOPML(file) {
   }
   const have = new Set(S.feeds.map((f) => f.url));
   const fresh = found.filter((f) => !have.has(f.url));
-  for (const f of fresh) S.localFeeds.push({ id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder: f.folder, site: '', local: true });
-  store.set('localFeeds', S.localFeeds);
+  const catalog = catalogByUrl();
+  S.subs ??= [];
+  for (const f of fresh) {
+    const c = catalog.get(f.url);
+    S.subs.push(c ? { id: c.id, url: c.url, title: c.title, folder: f.folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder: f.folder, own: true, site: '' });
+  }
+  saveSubs();
   toast(`Imported ${fresh.length} feed${fresh.length === 1 ? '' : 's'}${found.length > fresh.length ? ` (${found.length - fresh.length} you already had)` : ''}. Fetching…`, 4000);
   rebuild(); render();
-  await refreshLocalFeeds();
+  await refreshOwnFeeds();
   rebuild(); render();
+  const blocked = S.feeds.filter((f) => f.own && f.error).length;
+  if (blocked && !S.settings.relay) toast(`${blocked} feed${blocked === 1 ? '' : 's'} need your relay to be read. See ⚙ Settings → Your feeds.`, 6000);
 }
 
 // ---------- sidebar on phones ----------
@@ -1088,12 +1285,7 @@ function wire() {
           return;
         case 'unsub': {
           const f = S.feedById.get(S.view.id);
-          if (f && confirm(`Unsubscribe from ${f.title}?`)) {
-            S.localFeeds = S.localFeeds.filter((x) => x.id !== f.id);
-            delete S.localItems[f.id];
-            store.set('localFeeds', S.localFeeds); store.set('localItems', S.localItems);
-            rebuild(); go('#/home');
-          }
+          if (f && confirm(`Unsubscribe from ${f.title}?`)) { unsubscribe(f.id); go('#/home'); }
           return;
         }
       }
@@ -1105,6 +1297,12 @@ function wire() {
   });
 
   // Add-feed dialog
+  $('#discoverList').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sub]');
+    if (!b) return;
+    const c = S.index.feeds.find((x) => x.id === b.dataset.sub);
+    if (c) { subscribeCatalog(c); renderDiscover(); renderSidebar(); toast(`Subscribed to ${c.title}`); }
+  });
   $('#addForm').addEventListener('submit', async (e) => {
     if (e.submitter?.value !== 'ok') return;
     e.preventDefault();
@@ -1162,7 +1360,29 @@ function wire() {
   $('#settingsDialog').addEventListener('close', () => render());
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
   $('#exportOpml').addEventListener('click', exportOPML);
-  $('#exportFeeds').addEventListener('click', exportFeedsJSON);
+  $('#relayInput').addEventListener('change', (e) => { S.settings.relay = e.target.value.trim(); saveSettings(); });
+  $('#relayToken').addEventListener('change', (e) => { S.settings.relayToken = e.target.value.trim(); saveSettings(); });
+  $('#testRelay').addEventListener('click', async () => {
+    const st = $('#relayStatus');
+    if (!S.settings.relay) { st.textContent = 'Enter your relay address first.'; return; }
+    st.textContent = 'Testing…';
+    try {
+      const xml = await fetchFeedText('https://xkcd.com/atom.xml', { relayOnly: true });
+      st.textContent = parseFeedXML(xml, 'https://xkcd.com/atom.xml', 'x') ? '✓ Your relay works.' : 'The relay answered, but not with a feed.';
+    } catch (err) { st.textContent = err.message; }
+  });
+  $('#exportBackup').addEventListener('click', () => exportBackup($('#includeKeys').checked));
+  $('#backupFile').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try { if (await importBackup(f)) location.reload(); } catch (err) { toast(err.message, 5000); }
+  });
+  $('#eraseAll').addEventListener('click', async () => {
+    if (!confirm('Erase all Sala Reader data on this device: subscriptions, read and starred articles, topics, settings and keys? Export a backup first if you want to keep it.')) return;
+    await eraseEverything();
+    location.reload();
+  });
   $('#resetRead').addEventListener('click', () => { if (confirm('Mark every article as unread?')) { S.read = {}; store.set('read', S.read); render(); } });
 
   // Keyboard
@@ -1222,9 +1442,16 @@ function openAdd() {
   $('#addFolder').value = S.view.type === 'folder' ? S.view.id : '';
   $('#addStatus').textContent = '';
   $('#folderList').innerHTML = [...new Set(S.feeds.map((f) => f.folder).filter(Boolean))].map((f) => `<option value="${esc(f)}">`).join('');
-  $('#editFeedsLink').href = `https://github.com/${REPO}/edit/main/feeds.json`;
+  renderDiscover();
   $('#addDialog').showModal();
   closeSidebar();
+}
+
+function renderDiscover() {
+  const have = new Set(S.feeds.map((f) => f.url));
+  const avail = S.index.feeds.filter((c) => !have.has(c.url));
+  $('#discover').hidden = !avail.length;
+  $('#discoverList').innerHTML = avail.map((c) => `<li>${avatar(c)}<span class="name">${esc(c.title)}<span class="muted"> · ${esc(c.folder || host(c.site || c.url))}</span></span><button type="button" class="ghost" data-sub="${esc(c.id)}">＋ Add</button></li>`).join('');
 }
 
 function openTopic(prefill = '') {
@@ -1240,7 +1467,7 @@ async function refresh() {
   const btn = $('#refreshBtn');
   btn.classList.add('spin');
   const before = S.index.updated;
-  await Promise.all([loadIndex(true), refreshLocalFeeds()]);
+  await Promise.all([loadIndex(true), refreshOwnFeeds()]);
   S.vectorsState = 'none';
   rebuild();
   if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); });
@@ -1252,6 +1479,8 @@ async function refresh() {
 // ---------- start ----------
 
 async function start() {
+  await loadStore();
+  loadState();
   applyTheme();
   wire();
   finishOpenRouterSignIn().then((key) => {
@@ -1261,11 +1490,13 @@ async function start() {
     saveSettings();
     toast('✨ Signed in to OpenRouter', 4000);
   }).catch((e) => toast(e.message, 6000));
-  renderStreak();
   await loadIndex(false);
+  renderStreak();
   route();
   if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); });
-  if (S.localFeeds.length) refreshLocalFeeds().then(() => { rebuild(); renderSidebar(); });
+  const quietOwnRefresh = () => refreshOwnFeeds().then(() => { rebuild(); renderSidebar(); renderHeaderCounts(); });
+  if (S.feeds.some((f) => f.own)) quietOwnRefresh();
+  setInterval(() => { if (document.visibilityState === 'visible' && S.feeds.some((f) => f.own)) quietOwnRefresh(); }, 30 * 60 * 1000);
 }
 
 start();

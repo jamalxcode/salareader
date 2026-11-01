@@ -1,6 +1,6 @@
 # Sala Reader
 
-The old Google Reader, with the AI search Feedly has. It's a fast RSS reader with folders, unread counts and `j`/`k` keys, plus AI search that finds articles by meaning. It runs on GitHub Pages with no server and no account.
+The old Google Reader, with the AI search Feedly has. It's a fast RSS reader with folders, unread counts and `j`/`k` keys, plus AI search that finds articles by meaning. It runs on GitHub Pages with no server and no account, and **everything about you stays on your device**.
 
 **Open it:** https://salareader.sala.company/
 
@@ -17,9 +17,25 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
   - Keys stay in your browser and are sent only to that assistant's API. Usage is billed to that API account; a ChatGPT Plus subscription doesn't cover it.
   - Gemini, ChatGPT and OpenRouter accept requests from web pages. If DeepSeek or Grok refuse them, the error says so: use their models through OpenRouter instead.
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
-- **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML or `feeds.json`.
+- **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML.
+- **Move devices:** ⚙ Settings → *Export backup* saves everything to one file. *Import backup* on the other device restores it. API keys are left out unless you tick the box.
 
-Read and starred articles, topics, settings and feeds added in the browser are saved in your browser (localStorage). Starred articles are kept even after they leave the feed.
+## Privacy
+
+Sala Reader has no accounts and stores nothing about you on a server. Your subscriptions, folders, read and starred articles, AI topics, settings and API keys are kept only on your device, in the browser's IndexedDB storage. Starred articles are kept even after they leave the feed. *Erase all data on this device* in Settings deletes it all.
+
+Here is everything that leaves the device:
+
+| What | Goes to | When |
+|---|---|---|
+| The shared catalog (`data/`) | this site | on load. Everyone gets the same files, including all articles in one `content.json`, so the site can't tell what you follow or read |
+| Your own feeds | the feed's site, or **your own relay** | when the page refreshes them |
+| Images inside articles | their own sites, with no referrer | when you open an article |
+| The AI search model | jsDelivr and Hugging Face | once. Searches run on the device |
+| An article or a list of headlines | the AI assistant you chose | only when you press ✨ Summarize or ✨ Brief me |
+| A page visit | GoatCounter (no cookies) | on load. Only the page address, never feeds, articles, searches or the `?…` part of the address |
+
+Feed icons are letters drawn on the device, so no favicon service learns which sites you follow. Public CORS proxies are never used.
 
 ## How it works
 
@@ -37,14 +53,30 @@ cron-job.org ──(every 30 min)──▶ GitHub API: run update.yml
             your browser: reader UI, AI search, read/starred state
 ```
 
-- **`feeds.json`** lists the feeds the server fetches, in folders. Edit it on GitHub to add or remove feeds; the push triggers an update straight away.
+- **`feeds.json`** is the shared **catalog**: feeds the server fetches for everyone. A new reader starts subscribed to all of them and can unsubscribe from any. The rest are listed under ＋ Subscribe. Edit the file on GitHub to change the catalog; the push triggers an update straight away. Your own subscriptions are never written here.
 - **`.github/workflows/update.yml`** fetches the feeds, saves the data and deploys the site. It runs on every push to `main`, and whenever cron-job.org calls it.
 - **`scripts/fetch.mjs`** parses RSS, RSS 1.0 (RDF) and Atom. It keeps 60 days of items, at most 150 per feed, and computes an AI vector for each new item. It writes:
   - `data/index.json`: the feeds and the article list;
-  - `data/content/<feed>.json`: full article text, loaded when you open an article;
+  - `data/content.json`: full article text for every feed in one file, loaded when you open an article;
   - `data/vectors.json`: the AI vectors, loaded when you search.
 - **The `data` branch** keeps the last run's data, so history survives between runs. It's force-pushed as a single commit, so the repo doesn't grow.
-- **Feeds added in the browser** (＋ Subscribe, or OPML import) are fetched through a public CORS proxy and saved only in that browser. To make them permanent, use ⚙ Settings → *Download feeds.json* and replace the file in the repo.
+- **Your own feeds** (＋ Subscribe or OPML import, when not in the catalog) are fetched by the page itself, every time it opens and every 30 minutes while it's open. It asks the feed's site directly. Most sites block that, so it then asks [your own relay](#your-own-relay).
+
+## Your own relay
+
+Most websites don't let web pages read their feeds (CORS). Sala Reader then asks **your own relay**: `relay/worker.js`, a small Cloudflare Worker on your free Cloudflare account. It only answers your Sala Reader, stores nothing, and passes on nothing about you. Only you run it, so only you can see which feeds go through it.
+
+**Set it up (about 5 minutes):**
+
+1. Sign in at [dash.cloudflare.com](https://dash.cloudflare.com) (the free plan is plenty). Go to **Compute (Workers)** → **Workers & Pages** → **Create** → **Create Worker**, name it `salareader-relay`, and click **Deploy**.
+2. Click **Edit code**, replace everything with the contents of [`relay/worker.js`](relay/worker.js), and click **Deploy**.
+3. Optional but recommended: in the Worker's **Settings → Variables and Secrets**, add a **Secret** named `TOKEN` with any long random text. Only requests with that token are answered.
+4. In the Worker's **Settings → Observability**, make sure **Workers Logs** is off.
+5. Copy the Worker's address (`https://salareader-relay.<you>.workers.dev`). In Sala Reader, go to ⚙ Settings → **Your feeds**, paste it as the **Relay address**, add the token if you set one, and click **Test relay**.
+
+If you run Sala Reader at another address, add a variable `ALLOWED_ORIGIN` with that address (for example `https://reader.example.com`). With Node installed, `npx wrangler deploy` in `relay/` deploys it too.
+
+The relay address and token are part of your settings, so they're stored on your device and can travel in your backup.
 
 ## Updates with cron-job.org
 

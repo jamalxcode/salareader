@@ -1,0 +1,8 @@
+# Optional: deploy with `npx wrangler deploy` from this folder instead of the dashboard.
+name = "salareader-relay"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# No request logs.
+[observability]
+enabled = false
