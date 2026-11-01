@@ -320,8 +320,18 @@ async function loadIndex(bust) {
 
 const catalogByUrl = () => new Map(S.index.feeds.map((f) => [f.url, f]));
 
+/** One subscription per feed address (a feed added twice showed every article twice). */
+function dedupeSubs() {
+  if (!S.subs) return false;
+  const seen = new Set();
+  const before = S.subs.length;
+  S.subs = S.subs.filter((s) => { if (seen.has(s.url)) return false; seen.add(s.url); return true; });
+  return S.subs.length !== before;
+}
+
 function rebuild() {
   const catalog = catalogByUrl();
+  if (dedupeSubs()) saveSubs();
   S.feeds = (S.subs || S.pendingOwn || []).map((s) => {
     const c = catalog.get(s.url);
     // Catalog feeds come from the shared data; the rest is fetched by this page.
@@ -333,7 +343,11 @@ function rebuild() {
   S.feedById = new Map(S.feeds.map((f) => [f.id, f]));
   const catIds = new Set(S.feeds.filter((f) => !f.own).map((f) => f.id));
   const own = S.feeds.filter((f) => f.own).flatMap((f) => S.ownItems[f.id] || []);
-  S.items = [...S.index.items.filter((i) => catIds.has(i.f)), ...own].sort((a, b) => b.d - a.d);
+  // Each article once, even if something above ever lists it twice.
+  const seenIds = new Set();
+  S.items = [...S.index.items.filter((i) => catIds.has(i.f)), ...own]
+    .filter((i) => { if (seenIds.has(i.id)) return false; seenIds.add(i.id); return true; })
+    .sort((a, b) => b.d - a.d);
   S.byId = new Map(S.items.map((i) => [i.id, i]));
   // Forget read marks for items that are long gone.
   const cutoff = Date.now() - 90 * 864e5;
@@ -829,10 +843,19 @@ function subscribeCatalog(c, folder) {
   rebuild();
 }
 
+const addingNow = new Set();
+
 async function addFeed(url, folder) {
   url = url.trim();
+  // A second Enter or click while the first is still fetching must not add it twice.
+  if (addingNow.has(url)) throw new Error('Already adding this feed…');
+  addingNow.add(url);
+  try { return await addFeedOnce(url, folder); } finally { addingNow.delete(url); }
+}
+
+async function addFeedOnce(url, folder) {
   // Words rather than an address: follow a news search for them.
-  if (/\s/.test(url) || !/^[^\s]+\.[a-z]{2,}([/:?#]|$)/i.test(url.replace(/^https?:\/\//i, ''))) {
+  if (!/^https?:\/\//i.test(url) && (/\s/.test(url) || !/^[^\s]+\.[a-z]{2,}([/:?#]|$)/i.test(url))) {
     const q = url;
     const feedUrl = newsSearchUrl(q);
     if (S.feeds.some((f) => f.url === feedUrl)) throw new Error("You're already following this search.");
@@ -840,6 +863,7 @@ async function addFeed(url, folder) {
     const feed = { id: 'L' + hash(feedUrl), url: feedUrl, title: `“${q}” · News search`, titleSet: true, folder: folder.trim() || 'Searches', own: true, site: '' };
     await fetchOwnFeed(feed, undefined, { adding: true });
     S.subs ??= [];
+    if (S.subs.some((x) => x.url === feed.url)) throw new Error("You're already subscribed to this feed.");
     S.subs.push(feed);
     saveSubs();
     saveOwnFeed(feed.id);
@@ -868,6 +892,7 @@ async function addFeed(url, folder) {
   const feed = { id: 'L' + hash(feedUrl), url: feedUrl, title: host(feedUrl), folder: folder.trim(), own: true, site: '' };
   await fetchOwnFeed(feed, text, { adding: true });
   S.subs ??= [];
+  if (S.subs.some((x) => x.url === feed.url)) throw new Error("You're already subscribed to this feed.");
   S.subs.push(feed);
   saveSubs();
   saveOwnFeed(feed.id);
