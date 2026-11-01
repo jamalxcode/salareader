@@ -2,7 +2,9 @@
 // browser with transformers.js; Claude (summaries, briefings) runs only when
 // the reader has added their own API key.
 
-const TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.web.min.js';
+// The self-contained browser build: the .web build imports onnxruntime by bare
+// name, which a browser can't resolve without a bundler.
+const TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js';
 const ANTHROPIC_SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.135.0/+esm';
 export const EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2'; // must match scripts/fetch.mjs
 
@@ -127,7 +129,8 @@ async function openaiClient(p, apiKey) {
 const NOT_CHAT = /(embed|image|dall|tts|whisper|audio|realtime|transcri|speech|moderation|search|live|sora|vision-preview|instruct|davinci|babbage)/i;
 function isChatModel(pid, id) {
   if (NOT_CHAT.test(id)) return false;
-  if (pid === 'openai') return /^(gpt-|chatgpt-|o\d)/.test(id);
+  // Codex, deep-research and -pro models only work through the Responses API, not chat.
+  if (pid === 'openai') return /^(gpt-|chatgpt-|o\d)/.test(id) && !/codex|deep-research|-pro\b/.test(id);
   if (pid === 'xai') return id.startsWith('grok-');
   if (pid === 'gemini') return id.startsWith('gemini-');
   return true;

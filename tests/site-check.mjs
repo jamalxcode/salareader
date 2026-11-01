@@ -75,11 +75,15 @@ await step('AI search by meaning (downloads the model)', async () => {
   const n = await page.$$eval('article.entry', (a) => a.length);
   const pct = await page.$$eval('article.entry .match', (m) => m.slice(0, 3).map((x) => x.textContent));
   if (!n) throw new Error(`no results; header says "${sub}"; empty text: ${await page.$eval('#list', (e) => e.textContent.trim().slice(0, 120))}`);
+  if (!pct.length) throw new Error(`results are word matches only (no match scores); header says "${sub}"`);
   return `${n} results, top matches ${pct.join(' ')}`;
 });
 
 await step('More like this', async () => {
+  await page.goto(SITE + '/#/all');
+  await page.waitForSelector('article.entry');
   await page.click('article.entry .row');
+  await page.waitForSelector('.body [data-act="related"]');
   await page.click('.body [data-act="related"]');
   await page.waitForFunction(() => { const r = document.querySelector('.body .related'); return r && !r.querySelector('.loading'); }, null, { timeout: 120000 });
   const t = await page.$eval('.body .related', (e) => e.textContent.trim());

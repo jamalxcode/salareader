@@ -277,6 +277,12 @@ async function loadIndex(bust) {
     saveSubs();
     if (S.pendingOwn) { store.del('localFeeds'); S.pendingOwn = null; }
   }
+  if (!S.index.missing && S.subs) {
+    // Articles stored for feeds that aren't your own any more (unsubscribed, or now in the catalog).
+    const catalog = catalogByUrl();
+    const ownIds = new Set(S.subs.filter((x) => x.own && !catalog.has(x.url)).map((x) => x.id));
+    for (const id of Object.keys(S.ownItems)) if (!ownIds.has(id)) { delete S.ownItems[id]; store.del('own:' + id); store.del('vec:' + id); }
+  }
   rebuild();
 }
 
@@ -287,7 +293,10 @@ function rebuild() {
   S.feeds = (S.subs || S.pendingOwn || []).map((s) => {
     const c = catalog.get(s.url);
     // Catalog feeds come from the shared data; the rest is fetched by this page.
-    return c ? { ...c, title: s.title || c.title, folder: s.folder ?? c.folder } : Object.assign(s, { own: true });
+    if (c) return { ...c, title: s.title || c.title, folder: s.folder ?? c.folder };
+    // Your own feed, fetched by this page. A catalog feed whose data didn't load
+    // stays a catalog feed (no articles until it does), never an "own" one.
+    return s.own ? s : { ...s, catalogMissing: true };
   });
   S.feedById = new Map(S.feeds.map((f) => [f.id, f]));
   const catIds = new Set(S.feeds.filter((f) => !f.own).map((f) => f.id));
@@ -331,6 +340,26 @@ async function loadVectors() {
     S.version++;
   })();
   return S.vectorsPromise;
+}
+
+/**
+ * With AI topics, your own feeds' articles need vectors too, or topics only
+ * catch them by exact words. Worked out in the background (the model is
+ * already on the device from making the topic) and kept, so it's done once.
+ */
+let topicVectorsRunning = false;
+async function vectorsForTopics() {
+  if (!S.topics.length || topicVectorsRunning) return;
+  await loadVectors();
+  const missing = S.items.filter((i) => S.feedById.get(i.f)?.own && !S.vectors.has(i.id));
+  if (!missing.length) return;
+  topicVectorsRunning = true;
+  try {
+    await ensureVectors(missing);
+    renderSidebar();
+    if (S.view.type === 'home') render();
+    else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); }
+  } catch (e) { console.warn('Topic vectors', e); } finally { topicVectorsRunning = false; }
 }
 
 /** Makes sure every item has a vector, embedding in the browser where needed. */
@@ -528,7 +557,7 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   target.ok = Date.now();
   target.error = '';
   if ('direct' in feed) target.direct = feed.direct;
-  if (!adding) saveOwnFeed(target.id);
+  if (!adding) { saveOwnFeed(target.id); saveSubs(); }
   return parsed;
 }
 
@@ -537,6 +566,17 @@ function noteFeedError(feed, e) {
   if (!target) return;
   target.error = e.message || 'Could not fetch';
   if ('direct' in feed) target.direct = feed.direct;
+  saveSubs();
+}
+
+/** New articles arrived while you're reading a list: a button shows them, nothing jumps. */
+function offerNew() {
+  const shown = new Set(S.list.map((x) => x.id));
+  const fresh = viewItems().filter((it) => !shown.has(it.id));
+  const head = $('#viewHeader');
+  head.querySelector('.new-items')?.remove();
+  if (!fresh.length || S.view.type === 'search' || S.view.type === 'starred') return;
+  head.insertAdjacentHTML('beforeend', `<button class="new-items" data-act="shownew">↑ ${fresh.length} new article${fresh.length === 1 ? '' : 's'}</button>`);
 }
 
 const OWN_REFRESH_MS = 25 * 60 * 1000;
@@ -553,7 +593,7 @@ function refreshOwnFeeds({ force = false } = {}) {
   if (ownRefreshing) return ownRefreshing.then(() => refreshOwnFeeds({ force }));
   const run = async () => {
     const catalog = catalogByUrl();
-    const due = (S.subs || []).filter((s) => !catalog.has(s.url) && (force || s.error || !s.ok || Date.now() - s.ok > OWN_REFRESH_MS));
+    const due = (S.subs || []).filter((s) => s.own && !catalog.has(s.url) && (force || s.error || !s.ok || Date.now() - s.ok > OWN_REFRESH_MS));
     if (!due.length || stopRefresh) return;
     S.ownProgress = { done: 0, total: due.length };
     renderSidebar();
@@ -564,9 +604,11 @@ function refreshOwnFeeds({ force = false } = {}) {
       rebuild();
       saveSubs();
       renderSidebar();
-      // Fill an empty screen straight away; otherwise just update counts.
-      if (final || S.view.type === 'home' || !document.querySelector('#list article.entry')) render();
-      else renderHeaderCounts();
+      // Fill an empty list or Home; otherwise leave what you're reading alone
+      // and offer the new articles.
+      if (S.view.type === 'home' || !document.querySelector('#list article.entry')) render();
+      else { renderHeaderCounts(); if (final) offerNew(); }
+      if (final) vectorsForTopics();
     };
     let next = 0;
     await Promise.all(Array.from({ length: 4 }, async () => {
@@ -745,6 +787,7 @@ async function createTopic(query) {
   S.topics.push(topic);
   store.set('topics', S.topics);
   await loadVectors();
+  vectorsForTopics(); // your own feeds' articles, in the background
   return topic;
 }
 
@@ -1027,9 +1070,11 @@ function renderList(reset = true) {
   }
   const next = S.list.slice(S.shown, S.shown + PAGE);
   list.querySelector('.more')?.remove();
+  const from = S.shown;
   list.insertAdjacentHTML('beforeend', next.map((it, k) => entryHTML(it, S.shown + k)).join(''));
   S.shown += next.length;
-  if (S.settings.mode === 'expanded') list.querySelectorAll('article.expanded').forEach((a) => { fillContent(a); readObserver.observe(a); });
+  // Only the articles just added: ones above that you kept unread must stay unread.
+  if (S.settings.mode === 'expanded') list.querySelectorAll('article.expanded').forEach((a) => { if (+a.dataset.idx >= from) { fillContent(a); readObserver.observe(a); } });
   if (S.shown < S.list.length) {
     list.insertAdjacentHTML('beforeend', `<div class="more"><button data-act="more">Show more (${S.list.length - S.shown} left)</button></div>`);
     moreObserver.observe(list.querySelector('.more'));
@@ -1088,7 +1133,7 @@ function renderHome() {
       </div>
       ${fresh.length ? `<h2 class="home-h">Fresh picks</h2><div class="cards">${fresh.map((it) => {
         const f = S.feedById.get(it.f);
-        return `<a class="card" href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><img src="${esc(safeUrl(it.i))}" alt=""" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span class="card-src">${esc(f?.title || '')} · ${ago(it.d)}</span><span class="card-t">${esc(it.t)}</span></a>`;
+        return `<a class="card" href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><img src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span class="card-src">${esc(f?.title || '')} · ${ago(it.d)}</span><span class="card-t">${esc(it.t)}</span></a>`;
       }).join('')}</div>` : ''}
       ${latest.length ? `<h2 class="home-h">Latest</h2><div class="mini-list">${latest.map((it) => `<a href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><span class="src">${esc(S.feedById.get(it.f)?.title || '')}</span><span class="t">${esc(it.t)}</span><time>${ago(it.d)}</time></a>`).join('')}</div>` : ''}
       <h2 class="home-h">AI topics</h2>
@@ -1339,6 +1384,7 @@ function celebrate() {
 
 function openSettings() {
   const d = $('#settingsDialog');
+  S.settingsAtOpen = { threshold: S.settings.threshold, relayMode: S.settings.relayMode };
   $('#themeSel').value = S.settings.theme;
   renderAISettings();
   $('#thresholdRange').value = S.settings.threshold;
@@ -1434,16 +1480,16 @@ async function importBackup(file) {
   for (const [id, items] of Object.entries(d.ownItems || {})) if (Array.isArray(items)) store.set('own:' + id, items);
   // A backup without keys keeps the keys already on this device.
   if (!backup.includesKeys) store.set('settings', { ...store.get('settings', {}), keys: keepKeys, relayToken: keepRelayToken });
+  frozen = true; // nothing else is written until the page reloads
   await flush();
-  frozen = true; // until the page reloads
   return true;
 }
 
 async function eraseEverything() {
   stopRefresh = true;
   for (const k of store.keys()) store.del(k);
-  await flush();
   frozen = true;
+  await flush();
   try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k?.startsWith('sr.')) localStorage.removeItem(k); } } catch { /* blocked */ }
 }
 
@@ -1484,6 +1530,16 @@ function closeSidebar() { document.body.classList.remove('nav-open'); $('#scrim'
 
 // ---------- events ----------
 
+/** Puts the saved values of these keys back into the app state (after another tab saved them). */
+function applyKeys(keys) {
+  const fields = { subs: 'subs', read: 'read', starred: 'starred', topics: 'topics', collapsed: 'collapsed', days: 'days' };
+  for (const k of keys) {
+    if (fields[k]) S[fields[k]] = store.get(k, k === 'subs' ? null : Array.isArray(S[fields[k]]) ? [] : {});
+    else if (k === 'settings') { S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) }; applyTheme(); }
+    else if (k.startsWith('own:')) { const v = store.get(k, null); if (v) S.ownItems[k.slice(4)] = v; else delete S.ownItems[k.slice(4)]; }
+  }
+}
+
 function wire() {
   addEventListener('hashchange', route);
 
@@ -1492,8 +1548,7 @@ function wire() {
     const keys = e.data?.keys;
     if (!Array.isArray(keys) || frozen) return;
     await reloadKeys(keys);
-    loadState();
-    applyTheme();
+    applyKeys(keys.filter((k) => !dirty.has(k)));
     rebuild();
     renderSidebar();
     renderHeaderCounts();
@@ -1550,6 +1605,7 @@ function wire() {
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
         case 'refresh': refresh(); return;
+        case 'shownew': render(); window.scrollTo(0, 0); return;
         case 'switchai': openSettings(); return;
         case 'backup': openSettings(); $('#exportBackup').scrollIntoView({ block: 'center' }); $('#exportBackup').focus(); return;
         case 'dismissnote': store.set('deviceNoteDismissed', true); render(); return;
@@ -1633,7 +1689,12 @@ function wire() {
   });
   $('#orSignInBtn').addEventListener('click', () => startOpenRouterSignIn());
   $('#thresholdRange').addEventListener('input', (e) => { S.version++; S.settings.threshold = +e.target.value; $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`; saveSettings(); });
-  $('#settingsDialog').addEventListener('close', () => render());
+  $('#settingsDialog').addEventListener('close', () => {
+    // Only redraw the list if a setting that changes it moved; keeps your open article and AI answers.
+    const was = S.settingsAtOpen;
+    const changed = was && (was.threshold !== S.settings.threshold || was.relayMode !== S.settings.relayMode);
+    if (changed && S.view.type !== 'home') render(); else renderSidebar();
+  });
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
   $('#exportOpml').addEventListener('click', exportOPML);
   $('#relayModes').addEventListener('change', (e) => {
@@ -1643,7 +1704,12 @@ function wire() {
     $('#ownRelay').hidden = S.settings.relayMode !== 'own';
     $('#relayStatus').textContent = '';
   });
-  $('#relayInput').addEventListener('change', (e) => { S.settings.relay = e.target.value.trim(); saveSettings(); });
+  $('#relayInput').addEventListener('change', (e) => {
+    let v = e.target.value.trim();
+    if (v && !/^https?:\/\//i.test(v)) { v = 'https://' + v; e.target.value = v; }
+    S.settings.relay = v;
+    saveSettings();
+  });
   $('#relayToken').addEventListener('change', (e) => { S.settings.relayToken = e.target.value.trim(); saveSettings(); });
   $('#testRelay').addEventListener('click', async () => {
     const st = $('#relayStatus');
@@ -1678,6 +1744,8 @@ function wire() {
       if ($('#settingsDialog').open) renderAISettings();
       return;
     }
+    // Enter or Space on a focused link or button does what it normally does.
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('a[href], button, label, summary')) return;
     if (e.target.closest('input, textarea, select, dialog[open]') || e.metaKey || e.ctrlKey || e.altKey) {
       if (e.key === 'Escape' && e.target === $('#q')) $('#q').blur();
       return;
@@ -1777,7 +1845,7 @@ async function start() {
   await loadIndex(false);
   renderStreak();
   route();
-  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); });
+  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic' || S.view.type === 'home') render(); vectorsForTopics(); });
   // Your own feeds: those due now, then every few minutes while the page is open.
   if (S.feeds.some((f) => f.own)) refreshOwnFeeds();
   setInterval(() => { if (document.visibilityState === 'visible' && S.feeds.some((f) => f.own)) refreshOwnFeeds(); }, 5 * 60 * 1000);
