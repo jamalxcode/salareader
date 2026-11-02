@@ -8,7 +8,7 @@
 // site or through your own relay (relay/worker.js). Backup → export/import
 // moves everything to another device.
 
-import { decodeVector, encodeVector, dot, embed, embedText, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
+import { decodeVector, encodeVector, dot, embed as embedWith, embedText, EMBED_MODELS, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const PAGE = 60;
 const OWN_ITEMS_PER_FEED = 80;   // at most, per feed of your own
@@ -200,7 +200,7 @@ const store = {
 
 // The shared relay everyone uses unless they pick their own (relay/worker.js).
 const SHARED_RELAY = 'https://salareader-relay.jamal-akuna-matata.workers.dev';
-const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', sort: 'newest', viewPrefs: {}, threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '' };
+const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', sort: 'newest', viewPrefs: {}, threshold: 0.4, aiModel: 'en', aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '' };
 
 const S = {
   index: { feeds: [], items: [], updated: 0 },
@@ -480,6 +480,43 @@ async function feedContent(feedId) {
   return S.content;
 }
 
+// ---------- AI model choice: English (small) or multilingual ----------
+
+const modelKey = () => (S.settings.aiModel === 'multi' ? 'multi' : 'en');
+/** Embeds with the model chosen in Settings. */
+const embed = (texts, onProgress) => embedWith(texts, onProgress, modelKey());
+/** A topic's vector for the chosen model (en: qv, multi: qvm), or null until worked out. */
+const topicVec = (t) => { const a = modelKey() === 'multi' ? t.qvm : t.qv; return a ? Float32Array.from(a) : null; };
+/** Per-feed vector records: English ones are plain {id: b64}; others are tagged {_m, v}. */
+const vecRecord = (rec) => (rec && rec._m ? (rec._m === modelKey() ? rec.v : {}) : (modelKey() === 'en' ? rec || {} : {}));
+
+/** Works out topic vectors missing for the chosen model (after switching models). */
+let topicQvRunning = false;
+async function topicVectorsForModel() {
+  const field = modelKey() === 'multi' ? 'qvm' : 'qv';
+  const todo = S.topics.filter((t) => !t[field]);
+  if (!todo.length || topicQvRunning) return;
+  topicQvRunning = true;
+  try {
+    const vecs = await embed(todo.map((t) => t.query));
+    todo.forEach((t, k) => { t[field] = Array.from(vecs[k], (x) => +x.toFixed(4)); });
+    store.set('topics', S.topics);
+    S.version++;
+    renderSidebar();
+    if (S.view.type === 'home') refreshHome(); else if (S.view.type === 'topic') render();
+  } catch (e) { console.warn('Topic vectors', e); } finally { topicQvRunning = false; }
+}
+
+async function setAIModel(key) {
+  if (key === modelKey()) return;
+  S.settings.aiModel = key;
+  saveSettings();
+  S.vectors.clear();
+  S.vectorsState = 'none';
+  S.version++;
+  if (S.topics.length) { topicVectorsForModel().then(vectorsForTopics); loadVectors(); }
+}
+
 async function loadVectors() {
   if (S.vectorsState === 'ready' || S.vectorsState === 'loading') return S.vectorsPromise;
   S.vectorsState = 'loading';
@@ -488,9 +525,9 @@ async function loadVectors() {
       // Vectors for your own feeds' articles, worked out earlier on this device.
       for (const k of store.keys()) {
         if (!k.startsWith('vec:')) continue;
-        for (const [id, b64] of Object.entries(store.get(k, {}))) S.vectors.set(id, decodeVector(b64));
+        for (const [id, b64] of Object.entries(vecRecord(store.get(k, {})))) S.vectors.set(id, decodeVector(b64));
       }
-      const res = await fetch(`data/vectors.json?u=${S.index.updated}`);
+      const res = await fetch(`${EMBED_MODELS[modelKey()].vectors}?u=${S.index.updated}`);
       if (!res.ok) throw new Error(res.status);
       const data = await res.json();
       for (const [id, b64] of Object.entries(data.v || {})) S.vectors.set(id, decodeVector(b64));
@@ -535,7 +572,7 @@ async function ensureVectors(items, onProgress) {
   for (const fid of new Set(todo.filter((i) => S.feedById.get(i.f)?.own).map((i) => i.f))) {
     const rec = {};
     for (const it of S.ownItems[fid] || []) { const v = S.vectors.get(it.id); if (v) rec[it.id] = encodeVector(v); }
-    store.set('vec:' + fid, rec);
+    store.set('vec:' + fid, modelKey() === 'en' ? rec : { _m: modelKey(), v: rec });
   }
 }
 
@@ -633,6 +670,65 @@ async function fetchFeedText(url, { relayOnly = false, feed = null } = {}) {
     throw new Error(`The feed couldn't be fetched (HTTP ${res.status}).`);
   }
   return res.text();
+}
+
+// ---------- full article (for feeds that only send a summary) ----------
+
+const fullArticles = new Map(); // article id -> HTML (this session only)
+
+/** Asks the relay for just the article text of a page, as JSON blocks. */
+async function fetchFullArticle(it) {
+  const url = safeUrl(it.l);
+  if (!url) throw new Error('This article has no web address.');
+  const relay = relayUrl();
+  if (!relay) throw new Error('Full articles come through the relay, which is turned off in ⚙ Settings → Your feeds.');
+  const own = S.settings.relayMode === 'own';
+  await relayTurn();
+  const res = await fetch(`${relay}/?mode=article&url=${encodeURIComponent(url)}`, {
+    signal: AbortSignal.timeout(25000), credentials: 'omit', referrerPolicy: 'no-referrer',
+    headers: own && S.settings.relayToken ? { 'X-Relay-Token': S.settings.relayToken } : {},
+  }).catch(() => { throw new Error(`Couldn't reach ${own ? 'your' : 'the shared'} relay. Try again in a moment.`); });
+  if (res.status === 422) throw new Error("Couldn't find the article text on that page. Use Open original ↗.");
+  if (res.status === 429) throw new Error('The relay is busy. Try again in a minute.');
+  if (!res.ok) {
+    const site = Number(/site answered HTTP (\d+)/.exec(await res.text().catch(() => ''))?.[1]);
+    throw new Error(site ? `The site answered HTTP ${site}. Use Open original ↗.` : "Couldn't get the full article. Use Open original ↗.");
+  }
+  if (res.headers.get('X-Relay-Kind') !== 'article') {
+    throw new Error(own ? 'Your relay is an older version without full articles. Paste the new relay/worker.js into your Worker.' : 'The relay is an older version without full articles.');
+  }
+  const data = await res.json();
+  let html = '';
+  let list = false;
+  for (const b of data.blocks || []) {
+    if (b.t === 'li' && !list) { html += '<ul>'; list = true; }
+    if (b.t !== 'li' && list) { html += '</ul>'; list = false; }
+    if (b.t === 'img') { const src = safeUrl(b.src); if (src) html += `<img src="${esc(src)}" alt="${esc(b.alt || '')}" loading="lazy" referrerpolicy="no-referrer">`; continue; }
+    const tag = ['p', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre'].includes(b.t) ? b.t : 'p';
+    html += `<${tag}>${esc(b.x || '').replace(/\n/g, '<br>')}</${tag}>`;
+  }
+  if (list) html += '</ul>';
+  return html;
+}
+
+async function showFullArticle(article, btn) {
+  const it = S.byId.get(article.dataset.id) || S.starred[article.dataset.id];
+  const box = article.querySelector('[data-content]');
+  if (!it || !box) return;
+  if (btn.dataset.state === 'full') { // back to the feed's version
+    delete box.dataset.filled; btn.dataset.state = ''; btn.textContent = '📄 Full article';
+    await fillContent(article); return;
+  }
+  btn.disabled = true; btn.textContent = '📄 Getting the article…';
+  try {
+    if (!fullArticles.has(it.id)) fullArticles.set(it.id, await fetchFullArticle(it));
+    box.innerHTML = sanitize(fullArticles.get(it.id), safeUrl(it.l) || location.href);
+    box.dataset.filled = '1';
+    btn.dataset.state = 'full'; btn.textContent = '📄 Feed version';
+  } catch (e) {
+    btn.textContent = '📄 Full article';
+    toast(e.message, 5000);
+  } finally { btn.disabled = false; }
 }
 
 /** Turns HTML-only entities (&nbsp; …) and stray & into ones XML accepts. */
@@ -1266,7 +1362,7 @@ const topicCache = new Map();
 
 /** Articles matching a topic. Cached until items, vectors or the threshold change. */
 function topicMatches(topic) {
-  const key = `${S.version}|${S.settings.threshold}|${topic.query}`;
+  const key = `${S.version}|${S.settings.threshold}|${modelKey()}|${topic.query}`;
   const hit = topicCache.get(topic.id);
   if (hit?.key === key) return hit.result;
   const result = computeTopic(topic);
@@ -1286,7 +1382,7 @@ const wordRe = (text) => {
 function computeTopic(topic) {
   const words = topic.query.trim().split(/\s+/).filter((w) => w.length > 2).map(wordRe);
   const phrase = wordRe(topic.query.trim());
-  const qv = topic.qv ? Float32Array.from(topic.qv) : null;
+  const qv = topicVec(topic);
   const out = [];
   const scores = {};
   for (const it of S.items) {
@@ -1303,9 +1399,9 @@ function computeTopic(topic) {
 
 async function createTopic(query) {
   const status = $('#topicStatus');
-  status.textContent = 'Teaching the AI what you mean… (the first time downloads the model, ~25 MB)';
+  status.textContent = `Teaching the AI what you mean… (the first time downloads the model, ${EMBED_MODELS[modelKey()].size})`;
   const [qv] = await embed([query], (p) => { status.textContent = `Downloading the AI model… ${Math.round(p * 100)}%`; });
-  const topic = { id: hash(query + Date.now()), name: query.replace(/^./, (c) => c.toUpperCase()), query, qv: Array.from(qv, (x) => +x.toFixed(4)) };
+  const topic = { id: hash(query + Date.now()), name: query.replace(/^./, (c) => c.toUpperCase()), query, [modelKey() === 'multi' ? 'qvm' : 'qv']: Array.from(qv, (x) => +x.toFixed(4)) };
   S.topics.push(topic);
   store.set('topics', S.topics);
   await loadVectors();
@@ -1578,6 +1674,7 @@ function bodyHTML(it) {
       <button data-act="star" class="${star ? 'on' : ''}">${star ? '★ Starred' : '☆ Star'}</button>
       <button data-act="unread">${isRead(it.id) ? '◌ Keep unread' : '● Mark read'}</button>
       <a class="button" href="${esc(safeUrl(it.l) || '#')}" target="_blank" rel="noopener noreferrer">Open original ↗</a>
+      <button data-act="fullarticle" title="Get the whole article through the relay, without ads or trackers">📄 Full article</button>
       <button data-act="summarize" class="ai">✨ Summarize</button>
       <button data-act="related">🔗 More like this</button>
       <button data-act="share">Share</button>
@@ -2061,10 +2158,11 @@ function celebrate() {
 
 function openSettings() {
   const d = $('#settingsDialog');
-  S.settingsAtOpen = { threshold: S.settings.threshold, relayMode: S.settings.relayMode };
+  S.settingsAtOpen = { threshold: S.settings.threshold, relayMode: S.settings.relayMode, aiModel: modelKey() };
   $('#themeSel').value = S.settings.theme;
   renderAISettings();
   $('#thresholdRange').value = S.settings.threshold;
+  $('#aiModelSel').value = modelKey();
   $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`;
   $('#updatesInfo').innerHTML = `The starter catalog is refreshed on GitHub whenever cron-job.org calls it. ${S.index.updated ? `Last update: <b>${esc(new Date(S.index.updated).toLocaleString())}</b> (${agoText(S.index.updated)}).` : 'No update has run yet.'} Your own feeds are fetched by this page: when you open it, and again about every 25 minutes while it's open. Requests to the relay are paced to its limit of 60 a minute, so a big import takes a few minutes; articles appear as each feed arrives.`;
   for (const r of document.querySelectorAll('input[name="relayMode"]')) r.checked = r.value === S.settings.relayMode;
@@ -2298,6 +2396,7 @@ function wire() {
       if (article && act === 'star') { e.stopPropagation(); toggleStar(article.dataset.id); return; }
       if (article && act === 'unread') { S.view.keep?.add(article.dataset.id); markRead(article.dataset.id, !isRead(article.dataset.id)); return; }
       if (article && act === 'summarize') { summarize(article); return; }
+      if (article && act === 'fullarticle') { showFullArticle(article, e.target.closest('[data-act]')); return; }
       if (article && act === 'related') { related(article); return; }
       if (article && act === 'share') { share(article); return; }
       switch (act) {
@@ -2478,6 +2577,20 @@ function wire() {
   });
 
   // Add-feed dialog
+  $('#dirFilter').addEventListener('input', () => renderDirectory());
+  $('#dirCats').addEventListener('click', (e) => { const c = e.target.closest('[data-dircat]'); if (c) { dirCat = c.dataset.dircat; renderDirectory(); } });
+  $('#dirList').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-dirsub]');
+    if (!b) return;
+    b.disabled = true;
+    b.textContent = 'Adding…';
+    try {
+      const feed = await addFeed(b.dataset.dirsub, $('#addFolder').value || b.dataset.cat);
+      if (feed && b.dataset.title) { const sub = liveSub(feed.url); if (sub && !sub.titleSet) { sub.title = b.dataset.title; sub.titleSet = true; saveSubs(); } }
+      rebuild(); renderSidebar(); renderDirectory();
+      toast(`Subscribed to ${b.dataset.title}`);
+    } catch (err) { b.disabled = false; b.textContent = '＋ Add'; toast(err.message, 5000); }
+  });
   $('#discoverList').addEventListener('click', (e) => {
     const b = e.target.closest('[data-sub]');
     if (!b) return;
@@ -2539,11 +2652,17 @@ function wire() {
     } catch (err) { $('#modelStatus').textContent = err.message; }
   });
   $('#orSignInBtn').addEventListener('click', () => startOpenRouterSignIn());
+  $('#aiModelSel').addEventListener('change', (e) => {
+    setAIModel(e.target.value);
+    $('#aiModelNote').textContent = e.target.value === 'multi'
+      ? 'Switched. The multilingual model (about 120 MB) downloads the next time you search; your topics are worked out again in the background.'
+      : 'Switched to English.';
+  });
   $('#thresholdRange').addEventListener('input', (e) => { S.version++; S.settings.threshold = +e.target.value; $('#thresholdVal').textContent = `(${Math.round(S.settings.threshold * 100)}%)`; saveSettings(); });
   $('#settingsDialog').addEventListener('close', () => {
     // Only redraw the list if a setting that changes it moved; keeps your open article and AI answers.
     const was = S.settingsAtOpen;
-    const changed = was && (was.threshold !== S.settings.threshold || was.relayMode !== S.settings.relayMode);
+    const changed = was && (was.threshold !== S.settings.threshold || was.relayMode !== S.settings.relayMode || was.aiModel !== modelKey());
     if (changed && S.view.type !== 'home') render(); else renderSidebar();
   });
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
@@ -2650,7 +2769,38 @@ function openAdd() {
   closeSidebar();
 }
 
+// ---------- Discover: a directory of popular feeds (directory.json) ----------
+
+let directory = null;
+let dirCat = '';
+async function loadDirectory() {
+  directory ??= fetch('directory.json').then((r) => (r.ok ? r.json() : { categories: [] })).catch(() => ({ categories: [] }));
+  return directory;
+}
+
+/** Popular feeds: suggested from your AI topics and folders, by category, or filtered by words. */
+async function renderDirectory() {
+  const dir = await loadDirectory();
+  const all = dir.categories.flatMap((c) => c.feeds.map((f) => ({ ...f, cat: c.name })));
+  const have = new Set(S.feeds.map((f) => f.url));
+  // What you're into: your topic words and folder names.
+  const interests = [...S.topics.map((t) => t.query), ...allFolderNames()].join(' ').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2);
+  const score = (f) => interests.filter((w) => `${f.title} ${f.tags} ${f.cat}`.toLowerCase().includes(w)).length;
+  const q = ($('#dirFilter').value || '').trim().toLowerCase();
+  const cats = ['For you', ...dir.categories.map((c) => c.name)];
+  if (!dirCat) dirCat = interests.length ? 'For you' : dir.categories[0]?.name || '';
+  $('#dirCats').innerHTML = q ? '' : cats.map((c) => `<button type="button" class="chip${c === dirCat ? ' on' : ''}" data-dircat="${esc(c)}">${esc(c)}</button>`).join('');
+  let list;
+  if (q) list = all.filter((f) => `${f.title} ${f.tags} ${f.cat}`.toLowerCase().includes(q));
+  else if (dirCat === 'For you') list = all.map((f) => [f, score(f)]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([f]) => f).slice(0, 12);
+  else list = all.filter((f) => f.cat === dirCat);
+  $('#dirList').innerHTML = list.length
+    ? list.map((f) => `<li>${avatar(f)}<span class="name">${esc(f.title)}<span class="muted"> · ${esc(f.cat)}</span></span>${have.has(f.url) ? '<span class="muted">✓ Subscribed</span>' : `<button type="button" class="ghost" data-dirsub="${esc(f.url)}" data-title="${esc(f.title)}" data-cat="${esc(f.cat)}">＋ Add</button>`}</li>`).join('')
+    : `<li class="muted">${dirCat === 'For you' && !q ? 'Create an AI topic or a folder, and suggestions show up here.' : 'Nothing matches.'}</li>`;
+}
+
 function renderDiscover() {
+  renderDirectory();
   const have = new Set(S.feeds.map((f) => f.url));
   const avail = S.index.feeds.filter((c) => !have.has(c.url));
   $('#discover').hidden = !avail.length;
@@ -2703,7 +2853,7 @@ async function start() {
   await loadIndex(false);
   renderStreak();
   route();
-  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic') render(); else if (S.view.type === 'home') refreshHome(); vectorsForTopics(); });
+  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'topic') render(); else if (S.view.type === 'home') refreshHome(); topicVectorsForModel().then(vectorsForTopics); });
   // Your own feeds: those due now, then every few minutes while the page is open.
   if (S.feeds.some((f) => f.own)) refreshOwnFeeds();
   setInterval(() => { if (document.visibilityState === 'visible' && S.feeds.some((f) => f.own)) refreshOwnFeeds(); }, 5 * 60 * 1000);

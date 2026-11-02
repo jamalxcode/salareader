@@ -42,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .model-cache
-          key: model-all-MiniLM-L6-v2-q8
+          key: models-v2-minilm-en-multi-q8
 
       - name: Restore previous feed data
         run: |
@@ -75,7 +75,7 @@ jobs:
       - name: Assemble the site
         run: |
           mkdir _site
-          cp -r index.html style.css app.js ai.js icon.svg feeds.json CNAME .nojekyll data _site/
+          cp -r index.html style.css app.js ai.js icon.svg feeds.json directory.json CNAME .nojekyll data _site/
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

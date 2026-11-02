@@ -16,7 +16,11 @@ import { XMLParser } from 'fast-xml-parser';
 
 const FEEDS_FILE = process.env.FEEDS_FILE || 'feeds.json';
 const DATA_DIR = process.env.DATA_DIR || 'data';
-const MODEL = 'Xenova/all-MiniLM-L6-v2'; // the page loads the same model, so vectors match
+// The page loads the same models, so vectors match. English (default) and multilingual.
+const MODELS = [
+  { id: 'Xenova/all-MiniLM-L6-v2', file: 'vectors.json' },
+  { id: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', file: 'vectors-multi.json' },
+];
 const KEEP_DAYS = 60;          // drop items older than this
 const KEEP_PER_FEED = 150;     // and keep at most this many per feed
 const MAX_CONTENT = 40000;     // characters of article HTML kept per item
@@ -206,13 +210,14 @@ async function pool(list, n, fn) {
 
 // ---------- vectors ----------
 
-let embedder;
-async function embed(texts) {
-  if (!embedder) {
+const embedders = new Map();
+async function embed(texts, model) {
+  if (!embedders.has(model)) {
     const { pipeline, env } = await import('@huggingface/transformers');
     if (process.env.MODEL_CACHE) env.cacheDir = process.env.MODEL_CACHE;
-    embedder = await pipeline('feature-extraction', MODEL, { dtype: 'q8' });
+    embedders.set(model, await pipeline('feature-extraction', model, { dtype: 'q8' }));
   }
+  const embedder = embedders.get(model);
   const out = [];
   for (let i = 0; i < texts.length; i += 32) {
     const batch = texts.slice(i, i + 32);
@@ -235,7 +240,7 @@ async function main() {
   const config = await readJSON(FEEDS_FILE, null);
   if (!config) throw new Error(`Can't read ${FEEDS_FILE}`);
   const prev = await readJSON(path.join(DATA_DIR, 'index.json'), { feeds: [], items: [] });
-  const prevVectors = await readJSON(path.join(DATA_DIR, 'vectors.json'), { v: {} });
+
   const prevFeeds = new Map(prev.feeds.map((f) => [f.id, f]));
 
   const wanted = [];
@@ -309,21 +314,26 @@ async function main() {
   const items = feeds.flatMap((x) => x.items).sort((a, b) => b.d - a.d);
   const keepIds = new Set(items.map((i) => i.id));
 
-  // Vectors: reuse old ones, embed only new items.
-  const vectors = {};
-  const todo = [];
-  for (const it of items) {
-    if (prevVectors.v?.[it.id] && prevVectors.model === MODEL) vectors[it.id] = prevVectors.v[it.id];
-    else todo.push(it);
-  }
-  if (todo.length && process.env.SKIP_EMBED !== '1') {
-    try {
-      const vecs = await embed(todo.map(embedText));
-      todo.forEach((it, k) => { vectors[it.id] = toB64(vecs[k]); });
-      console.log(`embedded ${todo.length} new items`);
-    } catch (e) {
-      console.log(`embedding skipped: ${e.message}`);
+  // Vectors for each model: reuse old ones, embed only new items.
+  const vectorFiles = {};
+  for (const m of MODELS) {
+    const prev = await readJSON(path.join(DATA_DIR, m.file), { v: {} });
+    const vectors = {};
+    const todo = [];
+    for (const it of items) {
+      if (prev.v?.[it.id] && prev.model === m.id) vectors[it.id] = prev.v[it.id];
+      else todo.push(it);
     }
+    if (todo.length && process.env.SKIP_EMBED !== '1') {
+      try {
+        const vecs = await embed(todo.map(embedText), m.id);
+        todo.forEach((it, k) => { vectors[it.id] = toB64(vecs[k]); });
+        console.log(`embedded ${todo.length} new items (${m.id})`);
+      } catch (e) {
+        console.log(`embedding skipped for ${m.id}: ${e.message}`);
+      }
+    }
+    vectorFiles[m.file] = { model: m.id, dim: 384, v: vectors };
   }
 
   await mkdir(DATA_DIR, { recursive: true });
@@ -338,7 +348,7 @@ async function main() {
   }
   await writeFile(path.join(DATA_DIR, 'content.json'), JSON.stringify(allContent));
   await rm(path.join(DATA_DIR, 'content'), { recursive: true, force: true });
-  await writeFile(path.join(DATA_DIR, 'vectors.json'), JSON.stringify({ model: MODEL, dim: 384, v: vectors }));
+  for (const [file, data] of Object.entries(vectorFiles)) await writeFile(path.join(DATA_DIR, file), JSON.stringify(data));
   for (const [k, t] of Object.entries(seen)) if (t < now - 400 * 864e5) delete seen[k];
   await writeFile(path.join(DATA_DIR, 'seen.json'), JSON.stringify(seen));
   await writeFile(path.join(DATA_DIR, 'index.json'), JSON.stringify({

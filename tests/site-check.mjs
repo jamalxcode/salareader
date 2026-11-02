@@ -93,6 +93,33 @@ await step('More like this', async () => {
   return t.slice(0, 100);
 });
 
+await step('multilingual AI search: English query finds by meaning (downloads ~120 MB)', async () => {
+  const r = await page.evaluate(async () => {
+    try {
+      const ai = await import('./ai.js');
+      const [en, ar, ru, food] = await ai.embed(['war in Ukraine', 'الحرب في أوكرانيا', 'война на Украине', 'cooking pasta recipes'], null, 'multi');
+      const d = (a, b) => ai.dot(a, b).toFixed(2);
+      return `en~ar ${d(en, ar)}, en~ru ${d(en, ru)}, en~food ${d(en, food)}`;
+    } catch (e) { return 'ERROR ' + (e && (e.stack || e.message) || String(e)); }
+  });
+  if (r.startsWith('ERROR')) throw new Error(r.slice(0, 600));
+  const [ar, ru, food] = [...r.matchAll(/ (-?[\d.]+)/g)].map((m) => +m[1]);
+  if (!(ar > food + 0.2 && ru > food + 0.2)) throw new Error('languages not matched by meaning: ' + r);
+  const v = await page.evaluate(async () => { const x = await fetch('data/vectors-multi.json'); return x.ok ? Object.keys((await x.json()).v || {}).length : 'HTTP ' + x.status; });
+  return `${r}; catalog vectors-multi: ${v}`;
+});
+
+await step('Full article through the relay (needs the updated Worker)', async () => {
+  const r = await page.evaluate(async () => {
+    const res = await fetch('https://salareader-relay.jamal-akuna-matata.workers.dev/?mode=article&url=' + encodeURIComponent('https://daringfireball.net/projects/markdown/syntax'));
+    const kind = res.headers.get('X-Relay-Kind');
+    const t = await res.text();
+    return { status: res.status, kind, blocks: kind === 'article' ? JSON.parse(t).blocks.length : t.slice(0, 80) };
+  });
+  if (r.kind !== 'article') throw new Error(`relay answered ${r.status} ${r.kind}: ${r.blocks} (paste the new relay/worker.js into the Cloudflare Worker)`);
+  return `${r.blocks} blocks`;
+});
+
 await step('add a website through the shared relay', async () => {
   await page.goto(SITE + '/?debug#/home');
   await page.click('#addBtn');

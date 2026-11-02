@@ -6,7 +6,12 @@
 // name, which a browser can't resolve without a bundler.
 const TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js';
 const ANTHROPIC_SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.135.0/+esm';
-export const EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2'; // must match scripts/fetch.mjs
+// Must match scripts/fetch.mjs. English is small; multilingual covers 50+ languages.
+export const EMBED_MODELS = {
+  en: { id: 'Xenova/all-MiniLM-L6-v2', name: 'English', size: '25 MB', vectors: 'data/vectors.json' },
+  multi: { id: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', name: 'Multilingual (50+ languages)', size: 'about 120 MB', vectors: 'data/vectors-multi.json' },
+};
+export const EMBED_MODEL = EMBED_MODELS.en.id;
 
 // ---------- vectors ----------
 
@@ -40,18 +45,19 @@ export function dot(a, b) {
   return s;
 }
 
-let extractorPromise = null;
+const extractors = new Map(); // model key -> Promise<pipeline>
 let progressListeners = new Set();
 
-/** Loads the in-browser model once. onProgress(fraction 0..1) while downloading. */
-export function loadEmbedder(onProgress) {
+/** Loads an in-browser model once (key: 'en' or 'multi'). onProgress(fraction 0..1) while downloading. */
+export function loadEmbedder(onProgress, key = 'en') {
   if (onProgress) progressListeners.add(onProgress);
+  let extractorPromise = extractors.get(key);
   if (!extractorPromise) {
     const files = new Map();
     extractorPromise = (async () => {
       const { pipeline, env } = await import(TRANSFORMERS_URL);
       env.allowLocalModels = false;
-      return pipeline('feature-extraction', EMBED_MODEL, {
+      return pipeline('feature-extraction', (EMBED_MODELS[key] || EMBED_MODELS.en).id, {
         dtype: 'q8',
         progress_callback: (p) => {
           if (p.status === 'progress' && p.total) {
@@ -63,14 +69,15 @@ export function loadEmbedder(onProgress) {
         },
       });
     })();
-    extractorPromise.catch(() => { extractorPromise = null; });
+    extractors.set(key, extractorPromise);
+    extractorPromise.catch(() => { extractors.delete(key); });
     extractorPromise.finally(() => { progressListeners = new Set(); }).catch(() => {});
   }
   return extractorPromise;
 }
 
-export async function embed(texts, onProgress) {
-  const extractor = await loadEmbedder(onProgress);
+export async function embed(texts, onProgress, key = 'en') {
+  const extractor = await loadEmbedder(onProgress, key);
   const out = [];
   for (let i = 0; i < texts.length; i += 16) {
     const batch = texts.slice(i, i + 16);

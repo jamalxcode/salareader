@@ -444,3 +444,7 @@ details.menu > summary::-webkit-details-marker { display: none; }
 @media (max-width: 860px) {
   .vh-actions details.menu[open] .menu-list { position: fixed; top: auto; left: 16px; right: 16px; bottom: 16px; }
 }
+#directory { margin-top: 12px; }
+#dirFilter { display: block; width: 100%; margin: 6px 0 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
+#dirCats { margin-bottom: 6px; }
+.chip.on { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }

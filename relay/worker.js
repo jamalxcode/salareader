@@ -5,6 +5,8 @@
 // - Feeds only. It returns a response only if it's RSS or Atom. Given a web
 //   page, it returns just the feed links found on it, never the page, so it
 //   can't be used as a general proxy.
+// - "Full article" (?mode=article): for an article page, it returns only the
+//   article's text, headings and pictures as JSON, never the page itself.
 // - Rate-limited per visitor (60 requests a minute).
 // - Each feed is cached for 10 minutes, so many readers of one feed cost one
 //   fetch, and feed sites aren't hammered.
@@ -71,6 +73,48 @@ function feedLinks(html, base) {
   return [...new Set(out)].slice(0, 10);
 }
 
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', mdash: '—', ndash: '–', hellip: '…' };
+const decodeEntities = (t) => t.replace(/&(#x[\da-f]+|#\d+|\w+);/gi, (m, e) => {
+  if (e[0] === '#') { const n = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1); try { return String.fromCodePoint(n); } catch { return ''; } }
+  return ENTITIES[e.toLowerCase()] ?? m;
+});
+const textOf = (html) => decodeEntities(html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')).replace(/[ \t\r\f\v]+/g, ' ').replace(/ *\n */g, '\n').trim();
+
+/**
+ * The readable part of an article page: plain-text blocks (paragraphs,
+ * headings, list items, quotes, code) and pictures, in page order.
+ * No page markup is passed on, only text and image addresses.
+ */
+function extractArticle(html, base) {
+  const title = textOf(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']*)/i.exec(html)?.[1] || /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] || '');
+  let body = html.replace(/<(script|style|noscript|svg|template|iframe|form|button|select|nav|header|footer|aside)\b[\s\S]*?<\/\1>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ');
+  // The page's <article> (the longest one) or its main area, if it has one.
+  const parts = [...body.matchAll(/<article\b[^>]*>([\s\S]*?)<\/article>/gi)].map((m) => m[1]);
+  const main = /<main\b[^>]*>([\s\S]*?)<\/main>/i.exec(body)?.[1];
+  const scope = parts.sort((a, b) => b.length - a.length)[0] || main || body;
+  const blocks = [];
+  let chars = 0;
+  const re = /<(p|h[1-6]|li|blockquote|pre)\b[^>]*>([\s\S]*?)<\/\1>|<img\b([^>]*)>/gi;
+  for (const m of scope.matchAll(re)) {
+    if (m[3] !== undefined) {
+      const src = /\b(?:data-src|src)=["']([^"']+)["']/i.exec(m[3])?.[1];
+      if (!src || /^data:/i.test(src)) continue;
+      const w = +(/\bwidth=["']?(\d+)/i.exec(m[3])?.[1] || 0);
+      if (w && w < 120) continue; // icons, tracking pixels
+      try { const u = new URL(decodeEntities(src), base); if (/^https?:$/.test(u.protocol)) blocks.push({ t: 'img', src: u.href, alt: textOf(/\balt=["']([^"']*)["']/i.exec(m[3])?.[1] || '').slice(0, 200) }); } catch { /* skip */ }
+    } else {
+      const tag = m[1].toLowerCase();
+      const x = textOf(m[2]);
+      if (!x) continue;
+      if (tag === 'p' && scope === body && x.length < 60) continue; // menus and captions on pages without an <article>
+      blocks.push({ t: tag === 'h1' ? 'h2' : tag, x: x.slice(0, 5000) });
+      chars += x.length;
+    }
+    if (blocks.length >= 400 || chars > 100_000) break;
+  }
+  return { title: title.slice(0, 300), blocks, chars };
+}
+
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') || '';
@@ -98,13 +142,15 @@ export default {
     if (limited) return reply(429, 'Too many requests. Try again in a minute.', { 'Retry-After': '60' });
 
     let target;
-    try { target = new URL(new URL(request.url).searchParams.get('url') || ''); } catch { return reply(400, 'Add ?url=<feed address>.'); }
+    const params = new URL(request.url).searchParams;
+    try { target = new URL(params.get('url') || ''); } catch { return reply(400, 'Add ?url=<feed address>.'); }
+    const articleMode = params.get('mode') === 'article';
 
     // Feeds already fetched in the last 10 minutes (only real feeds are kept,
     // never an error page or a "you look like a bot" page).
     const cacheKey = new Request('https://feed-cache.invalid/' + encodeURIComponent(target.href));
     const cache = globalThis.caches?.default; // Cloudflare's cache (absent when testing locally)
-    const cached = cache && await cache.match(cacheKey);
+    const cached = cache && !articleMode && await cache.match(cacheKey);
     if (cached) return reply(200, await cached.text(), { 'Content-Type': 'application/xml; charset=utf-8', 'X-Relay-Kind': 'feed' });
 
     // Follow redirects one at a time, checking every address on the way.
@@ -136,6 +182,13 @@ export default {
     if (buf.byteLength > MAX_BYTES) return reply(413, 'Too big for a feed.');
     // Re-encoded as UTF-8 (the reply says so), whatever the feed's own charset.
     const text = decodeFeed(buf, res.headers.get('Content-Type') || '');
+
+    if (articleMode) {
+      if (!isHtml(text)) return reply(415, "That address isn't a web page.");
+      const art = extractArticle(text, target.href);
+      if (art.chars < 200) return reply(422, "Couldn't find the article text on that page.");
+      return reply(200, JSON.stringify({ title: art.title, url: target.href, blocks: art.blocks }), { 'Content-Type': 'application/json', 'X-Relay-Kind': 'article' });
+    }
 
     if (isFeed(text)) {
       // Shared 10-minute cache for everyone reading this feed.

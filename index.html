@@ -50,6 +50,12 @@
     <p class="hint">Your subscriptions are saved only on this device. This page fetches the feed straight from its site, or through the relay if the site blocks web pages (⚙ Settings → Your feeds).</p>
     <p id="addStatus" class="status" aria-live="polite"></p>
     <div class="buttons"><button type="button" class="ghost" data-close>Close</button><button id="addSubmit" value="ok" class="primary">Subscribe</button></div>
+    <section id="directory">
+      <h3>Discover popular feeds</h3>
+      <input id="dirFilter" type="search" placeholder="Filter: e.g. space, apple, crypto" aria-label="Filter popular feeds">
+      <div id="dirCats" class="chips"></div>
+      <ul id="dirList" class="discover"></ul>
+    </section>
     <section id="discover" hidden>
       <h3>From the catalog</h3>
       <p class="hint">Shared feeds the site already fetches. Adding one tells no one.</p>
@@ -119,6 +125,13 @@
     <section>
       <h3>AI search</h3>
       <p class="hint">Search and AI topics run a small AI model in your browser (about 25 MB, downloaded once). It's free and nothing you search leaves your device.</p>
+      <label>Languages
+        <select id="aiModelSel">
+          <option value="en">English (about 25 MB)</option>
+          <option value="multi">Multilingual: Arabic, Persian, Russian, Armenian and 50+ more (about 120 MB)</option>
+        </select>
+      </label>
+      <p class="hint" id="aiModelNote" aria-live="polite">Multilingual matches by meaning across languages: an English topic also finds Arabic or Russian articles about the same thing.</p>
       <label>How closely topics must match <span id="thresholdVal"></span>
         <input id="thresholdRange" type="range" min="0.25" max="0.6" step="0.01">
       </label>
