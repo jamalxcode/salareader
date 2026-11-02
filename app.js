@@ -2461,8 +2461,8 @@ function setPaneWidth(name, w, save = true) {
     root.setProperty(c.cssVar, w + 'px');
     if (save) try { localStorage.setItem(c.key, String(w)); } catch {}
   }
-  const h = $(c.handle), now = $(c.pane)?.offsetWidth;
-  if (h && now) { h.setAttribute('aria-valuenow', String(now)); h.setAttribute('aria-valuemin', String(c.min)); h.setAttribute('aria-valuemax', String(Math.round(paneMax(name)))); }
+  const h = $(c.handle), now = $(c.pane)?.offsetWidth || w || c.min;
+  if (h) { h.setAttribute('aria-valuenow', String(now)); h.setAttribute('aria-valuemin', String(c.min)); h.setAttribute('aria-valuemax', String(Math.round(paneMax(name)))); }
 }
 const restorePane = (name) => { const w = savedWidth(name); if (w) setPaneWidth(name, w, false); };
 const setInvWidth = (w, save) => setPaneWidth('inv', w, save);
@@ -2472,7 +2472,7 @@ function initResizer(name) {
   if (!h) return;
   // Dragging toward the articles makes the pane wider.
   const grow = (dx) => (c.side === 'right' ? -dx : dx);
-  restorePane(name);
+  setPaneWidth(name, savedWidth(name), false); // also gives the handle its aria values
   h.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
