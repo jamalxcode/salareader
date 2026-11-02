@@ -142,6 +142,7 @@ export function parseFeed(xml, feedUrl) {
   const out = {
     title: stripTags(text(channel.title)),
     site: absolute(site, feedUrl),
+    lang: String(text(channel.language) || text(channel['dc:language']) || channel['@xml:lang'] || '').toLowerCase().slice(0, 5),
     items: [],
   };
   // Atom's xml:base sets the address relative links are resolved against.
@@ -163,7 +164,13 @@ export function parseFeed(xml, feedUrl) {
     let d = Date.parse(dateStr);
     if (!Number.isFinite(d) || d > now + 864e5) d = NaN;
     const author = stripTags(text(it.author?.name ?? it.author) || text(it['dc:creator']));
-    out.items.push({ guid, title, link, html: String(html), date: d, author, image: (() => { const im = firstImage(it, html); return im ? absolute(im, link) : ''; })() });
+    // Categories and attached audio/video, for smart folders.
+    const cats = arr(it.category).map((c) => stripTags(typeof c === 'object' ? c['@term'] || text(c) : text(c))).filter((c) => c && c.length < 50).slice(0, 8);
+    const types = [...arr(it.enclosure), ...arr(it['media:content']), ...arr(it['media:group']?.['media:content'])].map((e) => e?.['@type'] || (e?.['@medium'] ? e['@medium'] + '/' : ''));
+    if (it['yt:videoId']) types.push('video/youtube');
+    const media = types.some((t) => /^audio\//i.test(t)) ? 'audio' : types.some((t) => /^video\//i.test(t)) || /youtube\.com\/watch|youtu\.be\//i.test(link) ? 'video' : '';
+    const words = (stripTags(String(html)).match(/[\p{L}\p{N}]+/gu) || []).length;
+    out.items.push({ cats, media, words, guid, title, link, html: String(html), date: d, author, image: (() => { const im = firstImage(it, html); return im ? absolute(im, link) : ''; })() });
   }
   return out;
 }
@@ -269,12 +276,13 @@ async function main() {
   const feeds = await pool(wanted, CONCURRENCY, async (f) => {
     const id = sha(f.url, 8);
     const old = prevFeeds.get(id) || {};
-    const feed = { id, url: f.url, folder: f.folder, title: f.title || old.title || f.url, site: old.site || '', ok: old.ok || 0, error: '' };
+    const feed = { id, url: f.url, folder: f.folder, title: f.title || old.title || f.url, site: old.site || '', ...(old.lang ? { lang: old.lang } : {}), ok: old.ok || 0, error: '' };
     const map = itemsByFeed.get(id) || new Map();
     try {
       const parsed = parseFeed(await fetchText(f.url), f.url);
       if (!f.title && parsed.title) feed.title = parsed.title;
       if (parsed.site) feed.site = parsed.site;
+      if (parsed.lang) feed.lang = parsed.lang;
       feed.ok = now;
       // The same article under a new guid keeps its old id (so read marks stay).
       const idByKey = new Map([...map.values()].map((it) => [articleKey(it.l, it.t), it.id]));
@@ -292,6 +300,9 @@ async function main() {
           d: date, s: stripTags(p.html).slice(0, 280),
           ...(p.image ? { i: p.image } : {}),
           ...(p.author ? { a: p.author } : {}),
+          ...(p.cats.length ? { g: p.cats } : {}),
+          ...(p.media ? { m: p.media } : {}),
+          ...(p.words > 150 ? { w: p.words } : {}),
         });
         if (p.html) content[id][itemId] = p.html.length > MAX_CONTENT ? p.html.slice(0, MAX_CONTENT) + '…' : p.html;
       });

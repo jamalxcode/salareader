@@ -8,6 +8,7 @@
 // site or through your own relay (relay/worker.js). Backup → export/import
 // moves everything to another device.
 
+import { classify, smartInfo, wordCount, mediaKind, LANGS, TOPICS, META } from './smart.js';
 import { decodeVector, encodeVector, dot, embed as embedWith, embedText, EMBED_MODELS, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const PAGE = 60;
@@ -469,7 +470,40 @@ function rebuild() {
   for (const [id, t] of Object.entries(S.read)) if (t < cutoff && !S.byId.has(id)) { delete S.read[id]; changed = true; }
   if (changed) store.set('read', S.read);
   S.unread = unreadOf(S.items);
+  buildSmart();
   S.version++;
+}
+
+// ---------- smart folders ----------
+
+/**
+ * Every article sorted into smart folders (language, topic, kind); the views
+ * show only unread ones. Done in small chunks so a big reader never freezes,
+ * and remembered per article, so later passes are quick.
+ */
+let smartRun = 0;
+function buildSmart() {
+  const run = ++smartRun;
+  const items = S.items;
+  (async () => {
+    const smart = new Map();
+    const metaOf = new Map();
+    for (let i = 0; i < items.length; i++) {
+      if (i && i % 1500 === 0) { await new Promise((r) => setTimeout(r, 0)); if (run !== smartRun) return; }
+      const it = items[i];
+      let fm = metaOf.get(it.f);
+      if (!fm) { const f = S.feedById.get(it.f); fm = { lang: f?.lang || '', folders: f ? feedFolders(f) : [] }; metaOf.set(it.f, fm); }
+      for (const id of classify(it, fm)) {
+        let list = smart.get(id);
+        if (!list) smart.set(id, (list = []));
+        list.push(it);
+      }
+    }
+    if (run !== smartRun) return;
+    const first = !S.smart;
+    S.smart = smart;
+    if (first || S.view.type === 'smart') { renderSidebar(); if (S.view.type === 'smart') render(); } else scheduleCounts();
+  })();
 }
 
 async function feedContent(feedId) {
@@ -801,7 +835,16 @@ function parseFeedXML(xml, feedUrl, feedId) {
     const media = [...el.getElementsByTagName('*')].find((c) => /^(thumbnail|content)$/.test(c.localName) && c.getAttribute('url') && /image|^$/.test(c.getAttribute('medium') || c.getAttribute('type') || ''));
     const imgMatch = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
     const img = media?.getAttribute('url') || (imgMatch ? imgMatch[1] : '');
+    // Categories, and audio or video attached (podcasts, YouTube), for smart folders.
+    const cats = [...el.children].filter((c) => c.localName === 'category').map((c) => (c.getAttribute('term') || c.textContent || '').trim()).filter((x) => x && x.length < 50).slice(0, 8);
+    const types = [...el.getElementsByTagName('*')].filter((c) => /^(enclosure|content|group)$/.test(c.localName)).map((c) => c.getAttribute('type') || (c.getAttribute('medium') ? c.getAttribute('medium') + '/' : ''));
+    if ([...el.getElementsByTagName('*')].some((c) => c.namespaceURI?.includes('youtube'))) types.push('video/youtube');
+    const m = mediaKind(types, link);
+    const w = wordCount(html);
     return {
+      ...(cats.length ? { g: cats } : {}),
+      ...(m ? { m } : {}),
+      ...(w > 150 ? { w } : {}),
       id: 'L' + hash(feedUrl + '|' + guid) + hash(guid),
       f: feedId,
       t: strip(txt(el, 'title')) || '(untitled)',
@@ -813,7 +856,8 @@ function parseFeedXML(xml, feedUrl, feedId) {
       c: html.slice(0, 40000),
     };
   });
-  return { title: strip(txt(channel, 'title')), site, items };
+  const lang = (txt(channel, 'language', 'dc:language') || root.getAttribute('xml:lang') || '').toLowerCase().slice(0, 5);
+  return { title: strip(txt(channel, 'title')), site, lang, items };
 }
 
 function discoverFeed(html, pageUrl) {
@@ -1071,6 +1115,7 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
     delete target.convertedAt;
   }
   target.site = parsed.site || target.site;
+  if (parsed.lang) target.lang = parsed.lang; else delete target.lang;
   if (!target.titleSet && parsed.title) target.title = parsed.title;
   target.ok = Date.now();
   delete target.retired;
@@ -1433,9 +1478,11 @@ function viewItems() {
       break;
     }
     case 'search': items = v.results || []; S.scores = v.scores || null; break;
+    case 'smart': items = S.smart?.get(v.id) || []; break;
     default: items = [];
   }
-  const showAll = v.type === 'starred' || v.type === 'search' || !S.settings.unreadOnly;
+  // Smart folders show only unread articles (and ones opened while you're there).
+  const showAll = v.type === 'starred' || v.type === 'search' || (v.type !== 'smart' && !S.settings.unreadOnly);
   const shown = showAll ? items : items.filter((i) => !isRead(i.id) || v.keep?.has(i.id));
   // Oldest first (search keeps best matches first).
   return S.settings.sort === 'oldest' && v.type !== 'search' ? [...shown].sort((a, b) => a.d - b.d) : shown;
@@ -1450,6 +1497,7 @@ function viewTitle() {
     case 'folder': return v.id === RETIRED ? '📦 Retired feeds' : v.id || 'Unfiled';
     case 'topic': return '✨ ' + (S.topics.find((t) => t.id === v.id)?.name || 'Topic');
     case 'search': return `“${v.q}”`;
+    case 'smart': { const i = smartInfo(v.id); return i ? `${i.icon} ${i.name}` : 'Smart folder'; }
     default: return '';
   }
 }
@@ -1487,7 +1535,7 @@ function route() {
   const prevKey = JSON.stringify([S.view.type, S.view.id, S.view.q]);
   const prevKeep = S.view.keep;
   if (type === 'all' || type === 'starred') S.view = { type };
-  else if (type === 'feed' || type === 'folder' || type === 'topic') S.view = { type, id: arg };
+  else if (type === 'feed' || type === 'folder' || type === 'topic' || type === 'smart') S.view = { type, id: arg };
   else if (type === 'search' && arg) {
     if (S.view.type !== 'search' || S.view.q !== arg) { S.view = { type: 'search', q: arg }; runSearch(arg); }
   } else S.view = { type: 'home' };
@@ -1596,6 +1644,7 @@ function renderSidebar() {
     <a class="nav-item${active('home')}" href="#/home"><span class="ico">🏠</span>Home</a>
     <a class="nav-item${active('all')}" href="#/all"><span class="ico">📚</span><span class="name">All items</span>${count(total)}</a>
     <a class="nav-item${active('starred')}" href="#/starred"><span class="ico">⭐</span><span class="name">Starred</span>${nStar ? `<span class="count muted">${nStar}</span>` : ''}</a>
+    ${smartSidebarHTML(active, count)}
     <div class="nav-section"><span>AI topics</span><button class="mini" id="addTopicBtn" title="New AI topic" aria-label="New AI topic">＋</button></div>`;
   if (!S.topics.length) html += `<button class="nav-empty" id="addTopicBtn2">Follow a topic across all feeds →</button>`;
   for (const t of S.topics) {
@@ -1623,6 +1672,31 @@ function renderSidebar() {
   nav.innerHTML = html;
 }
 
+/** Smart folders under Starred: languages, topics and kinds, each with its unread count (empty ones hidden). */
+function smartSidebarHTML(active, count) {
+  if (!S.smart) return '';
+  const unreadIn = (id) => { let n = 0; for (const it of S.smart.get(id) || []) if (!isRead(it.id)) n++; return n; };
+  const row = (id) => {
+    const n = unreadIn(id);
+    if (!n && !active('smart', id)) return '';
+    const i = smartInfo(id);
+    return `<a class="nav-item smart${active('smart', id)}" href="#/smart/${encodeURIComponent(id)}"><span class="ico">${i.icon}</span><span class="name">${esc(i.name)}</span>${count(n)}</a>`;
+  };
+  const langs = Object.keys(LANGS).map((k) => 'lang:' + k).map((id) => [id, unreadIn(id)]).filter(([, n]) => n).sort((a, b) => b[1] - a[1]).map(([id]) => row(id)).join('');
+  const groups = [
+    ['__smart_lang', '🌐 Languages', langs],
+    ['__smart_topic', '🧭 Topics', TOPICS.map((t) => row('topic:' + t.id)).join('')],
+    ['__smart_kind', '🔎 By kind', META.map((m) => row('meta:' + m.id)).join('')],
+  ].filter(([, , rows]) => rows);
+  if (!groups.length) return '';
+  return `<div class="nav-section"><span>Smart folders</span></div>` + groups.map(([key, label, rows]) => {
+    const closed = folderClosed(key);
+    return `<div class="folder smart-group${closed ? ' closed' : ''}">
+      <div class="nav-item folder-row"><button class="twisty" data-folder="${key}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(label.slice(3))}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><button class="name linkish group-name" data-folder-toggle="${key}">${label}</button></div>
+      <div class="folder-feeds">${rows}</div></div>`;
+  }).join('');
+}
+
 function renderHeaderCounts() {
   const el = $('#viewHeader .sub');
   if (el) el.textContent = headerSub();
@@ -1633,6 +1707,7 @@ function headerSub() {
   const unread = unreadOf(all);
   const v = S.view;
   if (v.type === 'starred') return `${all.length} starred`;
+  if (v.type === 'smart') return `${unread} unread · a smart folder: sorted automatically from what the feeds say about each article`;
   if (v.type === 'search') return v.status || `${all.length} results, best matches first`;
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);
@@ -1649,7 +1724,7 @@ function renderHeader() {
   const h = $('#viewHeader');
   if (v.type === 'home') { h.innerHTML = ''; return; }
   const feed = v.type === 'feed' ? S.feedById.get(v.id) : null;
-  const filterable = !['starred', 'search'].includes(v.type);
+  const filterable = !['starred', 'search', 'smart'].includes(v.type);
   h.innerHTML = `
     <div class="vh-title">
       <h1>${feed ? avatar(feed, true) : ''}${esc(viewTitle())}</h1>
@@ -1772,6 +1847,7 @@ function emptyHTML() {
   if (v.type === 'search') return `<div class="empty"><p class="big">🔍</p><p>${esc(v.status || 'Nothing matched. Try describing it in other words.')}</p></div>`;
   if (v.type === 'starred') return `<div class="empty"><p class="big">☆</p><p>Star articles with <kbd>s</kbd> to keep them here, even after they leave the feed.</p></div>`;
   if (v.type === 'topic' && S.vectorsState === 'loading') return `<div class="empty"><p>Finding matching articles…</p></div>`;
+  if (v.type === 'smart') return `<div class="empty"><p class="big">🎉</p><p><b>All caught up.</b> No unread articles here.</p><p><button data-act="surprise">🎲 Surprise me</button></p></div>`;
   if (S.settings.unreadOnly && sourceItems().length) {
     return `<div class="empty"><p class="big">🎉</p><p><b>All caught up.</b> No unread articles here.</p><p><button data-act="allitems">Show read articles</button> <button data-act="surprise">🎲 Surprise me</button></p></div>`;
   }
@@ -2403,7 +2479,7 @@ function wire() {
   $('#helpBtn').addEventListener('click', () => $('#helpDialog').showModal());
 
   $('#sidebar').addEventListener('click', (e) => {
-    const tw = e.target.closest('.twisty');
+    const tw = e.target.closest('.twisty') || e.target.closest('[data-folder-toggle]')?.parentElement.querySelector('.twisty');
     if (tw) {
       const name = tw.dataset.folder;
       S.collapsed[name] = !folderClosed(name);

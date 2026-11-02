@@ -22,33 +22,48 @@ const STOP = {
 };
 const STOP_SETS = Object.fromEntries(Object.entries(STOP).map(([k, v]) => [k, new Set(v.split(' '))]));
 
-const SCRIPTS = [
-  ['hy', /\p{Script=Armenian}/gu], ['ka', /\p{Script=Georgian}/gu], ['he', /\p{Script=Hebrew}/gu],
-  ['el', /\p{Script=Greek}/gu], ['hi', /\p{Script=Devanagari}/gu], ['ko', /\p{Script=Hangul}/gu],
-  ['ja', /[\p{Script=Hiragana}\p{Script=Katakana}]/gu], ['zh', /\p{Script=Han}/gu],
-  ['ar', /\p{Script=Arabic}/gu], ['ru', /\p{Script=Cyrillic}/gu],
+// Code point ranges of scripts that tell a language on their own.
+const RANGES = [
+  [0x0530, 0x058f, 'hy'], [0x10a0, 0x10ff, 'ka'], [0x0590, 0x05ff, 'he'], [0x0370, 0x03ff, 'el'],
+  [0x0900, 0x097f, 'hi'], [0xac00, 0xd7af, 'ko'], [0x3040, 0x30ff, 'ja'], [0x4e00, 0x9fff, 'zh'],
+  [0x0600, 0x06ff, 'ar'], [0x0750, 0x077f, 'ar'], [0xfb50, 0xfeff, 'ar'], [0x0400, 0x04ff, 'ru'],
 ];
+const scriptOf = (c) => { for (const [a, b, k] of RANGES) if (c >= a && c <= b) return k; return ''; };
+const LATIN_ONLY = /^[\u0000-ɏḀ-ỿ -⁯₠-⃏←-⯿️\u{1f000}-\u{1faff}]*$/u;
 
 /** The language of a piece of text ('' if it can't tell), with the feed's declared language as a hint. */
 export function detectLang(text, feedLang = '') {
   const hint = (feedLang || '').toLowerCase().slice(0, 2);
-  const letters = (text.match(/\p{L}/gu) || []).length;
-  if (!letters) return LANGS[hint] ? hint : '';
-  for (const [code, re] of SCRIPTS) {
-    const n = (text.match(re) || []).length;
-    if (n < letters * 0.3) continue;
-    if (code === 'ar') {
-      if (/[پچژگ]/.test(text)) return hint === 'ur' ? 'ur' : 'fa';
-      return hint === 'fa' || hint === 'ur' ? hint : 'ar';
+  if (!LATIN_ONLY.test(text)) {
+    // Count letters per script in one pass.
+    const counts = {};
+    let letters = 0;
+    for (const ch of text) {
+      const c = ch.codePointAt(0);
+      if (c < 0x41) continue;
+      letters++;
+      const k = c > 0x24f ? scriptOf(c) : '';
+      if (k) counts[k] = (counts[k] || 0) + 1;
     }
-    if (code === 'ru') return /[іїєґ]/i.test(text) || hint === 'uk' ? 'uk' : 'ru';
-    if (code === 'zh') return /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text) ? 'ja' : 'zh';
-    return code;
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    if (top && top[1] >= letters * 0.3) {
+      const code = top[0];
+      if (code === 'ar') {
+        if (/[پچژگیک]/.test(text)) return hint === 'ur' ? 'ur' : 'fa';
+        return hint === 'fa' || hint === 'ur' ? hint : 'ar';
+      }
+      if (code === 'ru') return /[іїєґ]/i.test(text) || hint === 'uk' ? 'uk' : 'ru';
+      if (code === 'zh') return counts.ja ? 'ja' : 'zh';
+      return code;
+    }
   }
   // Latin letters: count each language's common words.
-  const words = text.toLowerCase().match(/[\p{L}']+/gu) || [];
+  const words = text.toLowerCase().split(/[\s.,;:!?()"“”«»\[\]{}\/|–—-]+/);
   const scores = {};
-  for (const w of words) for (const [code, set] of Object.entries(STOP_SETS)) if (set.has(w)) scores[code] = (scores[code] || 0) + 1;
+  for (const w of words) {
+    if (w.length > 7 || !w) continue;
+    for (const code in STOP_SETS) if (STOP_SETS[code].has(w)) scores[code] = (scores[code] || 0) + 1;
+  }
   const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
   const [best, second] = ranked;
   if (best && best[1] >= 2 && (!second || best[1] >= second[1] * 1.5)) return best[0];
@@ -60,29 +75,29 @@ export function detectLang(text, feedLang = '') {
 // A few words in French, Arabic, Persian and Russian so other languages land in topics too.
 export const TOPICS = [
   { id: 'politics', name: 'Politics', icon: '🏛️', folder: /politic|government|elections?/i,
-    words: 'politic election elected parliament senate senator congress congressman president presidential prime_minister government govt vote voters ballot campaign democrat republican referendum coalition opposition lawmaker legislat diplomat diplomacy sanction cabinet kremlin white_house downing_street trump biden harris putin zelensky pashinyan aliyev erdogan netanyahu macron starmer khamenei pezeshkian élection gouvernement ministre président parlement انتخابات حكومة الرئيس وزير برلمان مجلس دولت انتخابات مجلس وزیر رئیس‌جمهور выбор правительств президент парламент министр' },
+    words: 'politic* election elected parliament senate senator congress congressman president presidential prime_minister government govt vote voters ballot campaign democrat republican referendum coalition opposition lawmaker legislat* diplomat* diplomacy sanction* cabinet kremlin white_house downing_street trump biden harris putin zelensky pashinyan aliyev erdogan netanyahu macron starmer khamenei pezeshkian élection gouvernement ministre président parlement انتخابات حكومة الرئيس وزير برلمان مجلس دولت انتخابات مجلس وزیر رئیس‌جمهور выбор правительств президент парламент министр' },
   { id: 'conflict', name: 'Conflict & security', icon: '⚔️', folder: /conflict|war|defen[cs]e|military/i,
     words: 'war wars military army troops soldier missile airstrike air_strike drone strike ceasefire cease-fire invasion militant militia hostage shelling artillery frontline front_line nato pentagon idf hamas hezbollah houthi insurgent guerre armée حرب الجيش قصف صاروخ هدنة جنگ ارتش موشک война армия ракет удар' },
   { id: 'business', name: 'Business & money', icon: '💼', folder: /business|finance|money|econom|market/i,
-    words: 'econom market stock stocks shares investor invest earnings revenue profit ipo inflation interest_rate rates central_bank fed federal_reserve gdp recession tariff trade deficit merger acquisition acquire startup funding valuation layoff layoffs ceo nasdaq dow s&p oil_price prices opec bourse économie اقتصاد بورصة أسعار النفط اقتصاد بورس قیمت экономик рынок инфляц' },
+    words: 'econom* market stock stocks shares investor invest* earnings revenue profit ipo inflation* interest_rate rates central_bank fed federal_reserve gdp recession* tariff* trade deficit merger* acquisition* acquire startup funding valuation layoff* layoffs ceo nasdaq dow s&p oil_price prices opec bourse économie اقتصاد بورصة أسعار النفط اقتصاد بورس قیمت экономик рынок инфляц' },
   { id: 'tech', name: 'Tech', icon: '💻', folder: /tech|gadget|apple|android|mac\b|ios\b|linux|hardware|software/i,
-    words: 'tech technology apple iphone ipad mac macos ios android google microsoft windows samsung pixel smartphone phone laptop tablet chip chips semiconductor nvidia intel amd qualcomm gadget software app apps update browser chrome firefox cloud hardware wearable smartwatch headphones tesla spacex meta amazon tiktok twitter x.com telegram whatsapp وادي_السيليكون تقنية فناوری технолог' },
+    words: 'tech technology apple iphone ipad mac macos ios android google microsoft windows samsung pixel smartphone phone laptop tablet chip chips semiconductor* nvidia intel amd qualcomm gadget software app apps update browser chrome firefox cloud hardware wearable smartwatch headphones tesla spacex meta amazon tiktok twitter x.com telegram whatsapp وادي_السيليكون تقنية فناوری технолог' },
   { id: 'ai', name: 'AI', icon: '🤖', folder: /\bai\b|artificial_intelligence|machine_learning/i,
     words: 'ai artificial_intelligence machine_learning deep_learning neural llm llms chatgpt openai anthropic claude gemini copilot gpt chatbot chatbots generative deepmind mistral llama midjourney agentic agents intelligence_artificielle الذكاء_الاصطناعي هوش_مصنوعی искусственн нейросет' },
   { id: 'crypto', name: 'Crypto', icon: '🪙', folder: /crypto|bitcoin|blockchain/i,
     words: 'bitcoin btc ethereum eth crypto cryptocurrency cryptocurrencies blockchain stablecoin stablecoins nft nfts defi solana binance coinbase altcoin altcoins satoshi web3 dogecoin xrp ripple tether usdt halving بيتكوين العملات_المشفرة بیت‌کوین رمزارز биткоин криптовалют' },
   { id: 'science', name: 'Science & space', icon: '🔬', folder: /scien|space|astronom|physics/i,
-    words: 'science scientist scientists research researchers study_finds physics physicist astronomy astronomer nasa esa space telescope planet planets galaxy asteroid comet mars moon lunar rocket orbit species fossil dinosaur quantum biology chemistry genome dna evolution archaeolog علماء الفضاء دراسة دانشمندان фізик учёные космос' },
+    words: 'science scientist scientists research researchers study_finds physics physicist astronomy astronomer nasa esa space telescope planet planets galaxy asteroid comet mars moon lunar rocket orbit species fossil dinosaur quantum biology chemistry genome dna evolution archaeolog* علماء الفضاء دراسة دانشمندان фізик учёные космос' },
   { id: 'health', name: 'Health', icon: '🩺', folder: /health|medic|fitness|wellness/i,
     words: 'health healthcare disease vaccine vaccines cancer hospital hospitals virus covid pandemic outbreak medical medicine drug drugs fda who patients doctor doctors nurse mental_health obesity diabetes alzheimer heart_attack nutrition diet santé الصحة مستشفى لقاح سلامت بیمارستان здоровь больниц вакцин' },
   { id: 'climate', name: 'Climate & environment', icon: '🌱', folder: /climate|environment|green|energy/i,
-    words: 'climate emissions carbon co2 renewable renewables solar wind_power wildfire wildfires drought flood floods flooding heatwave heat_wave hurricane typhoon earthquake environment environmental pollution deforestation fossil_fuel fuels net_zero cop29 cop30 climat المناخ زلزال فيضانات آب‌وهوا زلزله климат' },
+    words: 'climate emissions carbon co2 renewable* renewables solar wind_power wildfire wildfires drought flood floods flooding heatwave heat_wave hurricane typhoon earthquake environment environmental pollution deforestation fossil_fuel fuels net_zero cop29 cop30 climat المناخ زلزال فيضانات آب‌وهوا زلزله климат' },
   { id: 'security', name: 'Cybersecurity', icon: '🔒', folder: /secur|privacy|infosec|hack/i,
-    words: 'hack hacked hacker hackers hacking breach breaches ransomware malware vulnerability vulnerabilities exploit exploited cve phishing cyberattack cyber_attack cybersecurity zero-day spyware botnet ddos backdoor infostealer data_leak password passwords encryption privacy' },
+    words: 'hack hacked hacker hackers hacking breach breaches ransomware* malware* vulnerability vulnerabilities exploit exploited cve phishing cyberattack* cyber_attack cybersecurity zero-day spyware* botnet ddos backdoor infostealer data_leak password passwords encryption privacy' },
   { id: 'sport', name: 'Sport', icon: '⚽', folder: /sport|football|soccer|nba|nfl|f1/i,
-    words: 'football soccer nba nfl mlb nhl match league championship tennis olympic olympics fifa uefa premier_league champions_league world_cup tournament coach goalkeeper striker formula_1 f1 grand_prix cricket rugby boxing ufc marathon كرة_القدم المنتخب دوري فوتبال لیگ футбол матч чемпионат' },
+    words: 'football soccer nba nfl mlb nhl match league championship* tennis olympic* olympics fifa uefa premier_league champions_league world_cup tournament coach goalkeeper striker formula_1 f1 grand_prix cricket rugby boxing ufc marathon كرة_القدم المنتخب دوري فوتبال لیگ футбол матч чемпионат' },
   { id: 'games', name: 'Games', icon: '🎮', folder: /gam(e|ing)|playstation|xbox|nintendo/i,
-    words: 'game games gaming gamer gamers playstation ps5 xbox nintendo switch steam esports console consoles videogame video_game minecraft fortnite' },
+    words: 'game games gaming gamer gamers playstation ps5 xbox nintendo switch steam esports console consoles videogame* video_game minecraft fortnite' },
   { id: 'culture', name: 'Culture & entertainment', icon: '🎬', folder: /culture|entertain|movie|film|music|books?|arts?\b|tv\b/i,
     words: 'film films movie movies tv series show netflix hbo disney hollywood music album song songs singer band concert celebrity actor actress oscar oscars grammy festival book books novel author art artist museum exhibition theatre theater cinéma musique سينما فيلم موسيقى سینما فیلم موسیقی фильм кино музык' },
   { id: 'programming', name: 'Programming', icon: '👩‍💻', folder: /program|code|coding|developer|dev\b|web ?dev/i,
@@ -90,17 +105,53 @@ export const TOPICS = [
 ];
 
 const escRe = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const LATINISH = /^[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}\p{N}&]/u;
-// Words are space-separated; "_" joins the words of a phrase ("prime_minister").
-for (const t of TOPICS) {
-  const words = [...new Set(t.words.split(/\s+/).filter(Boolean))];
-  const pat = (w) => escRe(w).replace(/_/g, '\\s+');
-  const spaced = words.filter((w) => LATINISH.test(w)).map(pat);
-  const other = words.filter((w) => !LATINISH.test(w)).map(pat);
-  const parts = [];
-  if (spaced.length) parts.push(`(?<![\\p{L}\\p{N}])(?:${spaced.join('|')})`);
-  if (other.length) parts.push(`(?:${other.join('|')})`);
-  t.re = new RegExp(parts.join('|'), 'iu');
+const LATIN = /^[\p{Script=Latin}\p{N}&]/u;
+// Words are space-separated; "_" joins the words of a phrase ("prime_minister"),
+// "*" marks a word start ("politic*" = politics, political…). Latin-script words
+// are looked up whole (plurals too); other scripts match anywhere, since Arabic
+// and Russian attach prefixes and endings to words.
+const EXACT = new Map(); // word or phrase -> topic indexes
+const STEMS = new Map(); // first 4 letters -> [[stem, topic index]]
+const PHRASE_START = new Set(); // first words of phrases
+TOPICS.forEach((t, ti) => {
+  const other = [];
+  for (const w of new Set(t.words.split(/\s+/).filter(Boolean))) {
+    if (!LATIN.test(w)) { other.push(escRe(w).replace(/_/g, '\\s+')); continue; }
+    const term = w.toLowerCase().replace(/_/g, ' ');
+    if (term.endsWith('*')) {
+      const stem = term.slice(0, -1);
+      const k = stem.slice(0, 4);
+      if (!STEMS.has(k)) STEMS.set(k, []);
+      STEMS.get(k).push([stem, ti]);
+    } else {
+      if (term.includes(' ')) PHRASE_START.add(term.split(' ')[0]);
+      if (!EXACT.has(term)) EXACT.set(term, new Set());
+      EXACT.get(term).add(ti);
+    }
+  }
+  t.other = other.length ? new RegExp(other.join('|'), 'iu') : null;
+});
+const NON_LATIN = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u;
+
+/** Indexes of the topics whose words appear in a text. */
+function topicsIn(text) {
+  const found = new Set();
+  if (!text) return found;
+  const tokens = text.toLowerCase().match(/[\p{L}\p{N}]+(?:[.&'’-][\p{L}\p{N}]+)*/gu) || [];
+  const add = (set) => { if (set) for (const ti of set) found.add(ti); };
+  for (let i = 0; i < tokens.length; i++) {
+    const w = tokens[i];
+    add(EXACT.get(w));
+    if (w.endsWith('s')) { add(EXACT.get(w.slice(0, -1))); if (w.endsWith('es')) add(EXACT.get(w.slice(0, -2))); }
+    if (w.length >= 4) for (const [stem, ti] of STEMS.get(w.slice(0, 4)) || []) if (w.startsWith(stem)) found.add(ti);
+    if (i + 1 < tokens.length && PHRASE_START.has(w)) {
+      const two = `${w} ${tokens[i + 1]}`;
+      add(EXACT.get(two));
+      if (i + 2 < tokens.length) add(EXACT.get(`${two} ${tokens[i + 2]}`));
+    }
+  }
+  if (NON_LATIN.test(text)) TOPICS.forEach((t, ti) => { if (t.other?.test(text)) found.add(ti); });
+  return found;
 }
 // Short words that are too common to count alone ("ai" in French means "have", "eth" etc.).
 const AI_STRICT = /(?<![\p{L}])(?:AI|A\.I\.)(?![\p{L}])/u;
@@ -122,19 +173,23 @@ const cache = new WeakMap();
  * feed: { title, lang, folders: [] }.
  */
 export function classify(it, feed) {
+  const key = `${feed?.lang || ''}|${(feed?.folders || []).join('|')}`;
   const hit = cache.get(it);
-  if (hit && hit.feed === feed) return hit.ids;
+  if (hit && hit.key === key) return hit.ids;
   const ids = [];
   const text = `${it.t || ''}. ${it.s || ''}`;
   const lang = it.lg || detectLang(text, feed?.lang);
   if (lang) ids.push('lang:' + lang);
   const cats = (it.g || []).join(' · ');
   const folders = (feed?.folders || []).join(' · ');
-  for (const t of TOPICS) {
+  const inTitle = topicsIn(it.t);
+  const inSummary = topicsIn(it.s);
+  const inCats = topicsIn(cats);
+  for (const [ti, t] of TOPICS.entries()) {
     let score = 0;
-    if (t.re.test(it.t || '')) score += 2;
-    if (t.re.test(it.s || '')) score += 1;
-    if (cats && t.re.test(cats)) score += 2;
+    if (inTitle.has(ti)) score += 2;
+    if (inSummary.has(ti)) score += 1;
+    if (inCats.has(ti)) score += 2;
     if (folders && t.folder.test(folders)) score += 2;
     if (t.id === 'ai' && score && !AI_STRICT.test(text) && !/intelligen|learning|llm|gpt|openai|anthropic|claude|gemini|chatbot|neural|deepmind|copilot|ذكاء|هوش|нейро|интеллект/i.test(`${text} ${cats} ${folders}`)) score = 0;
     if (score >= 2) ids.push('topic:' + t.id);
@@ -144,7 +199,7 @@ export function classify(it, feed) {
   if (it.m === 'audio') ids.push('meta:audio');
   if (it.w >= 1200) ids.push('meta:long');
   if (OPINION.test(cats) || /^(opinion|analysis|column|editorial|op-ed)\s*[:|–-]/i.test(it.t || '') || /\/(opinion|opinions|commentary|editorial|analysis|columns?)\//i.test(it.l || '')) ids.push('meta:opinion');
-  cache.set(it, { feed, ids });
+  cache.set(it, { key, ids });
   return ids;
 }
 

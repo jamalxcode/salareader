@@ -448,3 +448,8 @@ details.menu > summary::-webkit-details-marker { display: none; }
 #dirFilter { display: block; width: 100%; margin: 6px 0 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
 #dirCats { margin-bottom: 6px; }
 .chip.on { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+
+/* Smart folders */
+.folder > .folder-feeds > .nav-item.smart { padding-left: 34px; }
+.group-name { flex: 1; text-align: left; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-decoration: none; cursor: pointer; justify-content: flex-start; }
+.group-name:hover { text-decoration: none; }
