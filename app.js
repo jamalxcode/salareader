@@ -484,7 +484,7 @@ async function feedContent(feedId) {
 
 const modelKey = () => (S.settings.aiModel === 'multi' ? 'multi' : 'en');
 /** Embeds with the model chosen in Settings. */
-const embed = (texts, onProgress) => embedWith(texts, onProgress, modelKey());
+const embed = (texts, onProgress, onEmbedded) => embedWith(texts, onProgress, modelKey(), onEmbedded);
 /** A topic's vector for the chosen model (en: qv, multi: qvm), or null until worked out. */
 const topicVec = (t) => { const a = modelKey() === 'multi' ? t.qvm : t.qv; return a ? Float32Array.from(a) : null; };
 /** Per-feed vector records: English ones are plain {id: b64}; others are tagged {_m, v}. */
@@ -561,11 +561,11 @@ async function vectorsForTopics() {
 }
 
 /** Makes sure every item has a vector, embedding in the browser where needed. */
-async function ensureVectors(items, onProgress) {
+async function ensureVectors(items, onProgress, onEmbedded) {
   await loadVectors();
   const todo = items.filter((i) => !S.vectors.has(i.id));
   if (!todo.length) return;
-  const vecs = await embed(todo.map(embedText), onProgress);
+  const vecs = await embed(todo.map(embedText), onProgress, onEmbedded);
   todo.forEach((it, k) => S.vectors.set(it.id, vecs[k]));
   S.version++;
   // Keep your own feeds' vectors on the device, one record per feed, so they're worked out only once.
@@ -1517,12 +1517,10 @@ async function runSearch(q) {
   v.scores = null;
   v.status = 'Finding articles by meaning…';
   render();
-  // 2) Meaning-based results.
-  try {
-    await loadVectors();
-    const [qv] = await embed([q], (p) => { if (S.view === v) { v.status = `Downloading the AI model (first time only)… ${Math.round(p * 100)}%`; renderHeader(); } });
-    await ensureVectors(S.items.filter((i) => i.f.startsWith('L')));
-    if (S.view !== v) return;
+  // 2) Meaning-based results, at once with the articles that already have
+  // vectors; your own feeds' newer articles are worked out in the background
+  // (in a worker, so the page stays usable) and added when they're ready.
+  const rank = (qv) => {
     const scores = {};
     const ranked = [];
     for (const it of S.items) {
@@ -1532,14 +1530,45 @@ async function runSearch(q) {
       if (s >= 0.3) { scores[it.id] = s; ranked.push(it); }
     }
     ranked.sort((a, b) => scores[b.id] - scores[a.id]);
-    v.results = ranked.slice(0, 150);
-    v.scores = scores;
+    return { results: ranked.slice(0, 150), scores };
+  };
+  let qv;
+  try {
+    await loadVectors();
+    [qv] = await embed([q], (p) => { if (S.view === v) { v.status = `Downloading the AI model (first time only)… ${Math.round(p * 100)}%`; renderHeaderCounts(); } });
+    if (S.view !== v) return;
+    Object.assign(v, rank(qv));
     v.status = S.vectors.size ? '' : 'AI search needs the next feed update to finish its first run; showing word matches.';
   } catch (e) {
     console.warn(e);
     if (S.view !== v) return;
     v.status = "Couldn't load the AI model, so these are word matches only.";
+    render();
+    return;
   }
+  const missing = S.items.filter((i) => !S.vectors.has(i.id) && S.feedById.get(i.f)?.own);
+  if (missing.length) v.status = `Best matches first · checking ${missing.length} more articles from your feeds…`;
+  render();
+  if (!missing.length) return;
+  try {
+    await ensureVectors(missing, null, (done, total) => {
+      if (S.view === v) { v.status = `Best matches first · checking your feeds' articles… ${Math.round((done / total) * 100)}%`; renderHeaderCounts(); }
+    });
+  } catch (e) { console.warn(e); }
+  if (S.view !== v) return;
+  const next = rank(qv);
+  v.status = '';
+  const added = next.results.filter((it) => !v.scores?.[it.id]).length;
+  // Don't reshuffle the list under an article you're reading: offer the new matches instead.
+  if (S.cur >= 0 && added) {
+    v.pending = next;
+    v.status = `${added} more matches found in your feeds`;
+    renderHeaderCounts();
+    const sub = $('#viewHeader .sub');
+    if (sub) sub.insertAdjacentHTML('beforeend', ' · <button class="linkish" data-act="showpending">Show them</button>');
+    return;
+  }
+  Object.assign(v, next);
   if (S.view === v) render();
 }
 
@@ -2465,6 +2494,7 @@ function wire() {
         case 'newtopic': openTopic(); return;
         case 'more': renderList(false); return;
         case 'savetopic': openTopic(S.view.q); return;
+        case 'showpending': if (S.view.pending) { Object.assign(S.view, S.view.pending); delete S.view.pending; S.view.status = ''; render(); } return;
         case 'deltopic':
           if (confirm('Delete this topic?')) { S.topics = S.topics.filter((t) => t.id !== S.view.id); store.set('topics', S.topics); go('#/home'); }
           return;

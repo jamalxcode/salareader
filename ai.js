@@ -76,7 +76,36 @@ export function loadEmbedder(onProgress, key = 'en') {
   return extractorPromise;
 }
 
-export async function embed(texts, onProgress, key = 'en') {
+// The model runs in a Web Worker (embed-worker.js), so the page stays responsive
+// while it works. Falls back to this page if workers aren't available.
+let worker = null;
+let workerFailed = false;
+let jobSeq = 0;
+const pending = new Map();
+const downloadListeners = new Set();
+function getWorker() {
+  if (worker || workerFailed) return worker;
+  try {
+    worker = new Worker(new URL('./embed-worker.js', import.meta.url), { type: 'module' });
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'download') { downloadListeners.forEach((fn) => fn(m.p)); return; }
+      const job = pending.get(m.id);
+      if (!job) return;
+      if (m.type === 'progress') job.onEmbedded?.(m.done, m.total);
+      else { pending.delete(m.id); if (m.type === 'done') job.resolve(m.vecs); else job.reject(new Error(m.message)); }
+    };
+    worker.onerror = (e) => {
+      // A worker that can't start (old browser): use this page instead.
+      e.preventDefault?.();
+      workerFailed = true; worker = null;
+      for (const [id, job] of pending) { pending.delete(id); embedHere(job.texts, job.onProgress, job.key, job.onEmbedded).then(job.resolve, job.reject); }
+    };
+  } catch { workerFailed = true; worker = null; }
+  return worker;
+}
+
+async function embedHere(texts, onProgress, key, onEmbedded) {
   const extractor = await loadEmbedder(onProgress, key);
   const out = [];
   for (let i = 0; i < texts.length; i += 16) {
@@ -84,8 +113,28 @@ export async function embed(texts, onProgress, key = 'en') {
     const t = await extractor(batch, { pooling: 'mean', normalize: true });
     const dim = t.dims[t.dims.length - 1];
     for (let b = 0; b < batch.length; b++) out.push(Float32Array.from(t.data.slice(b * dim, (b + 1) * dim)));
+    onEmbedded?.(out.length, texts.length);
+    await new Promise((r) => setTimeout(r, 0)); // let the page breathe between batches
   }
   return out;
+}
+
+/**
+ * Vectors for texts. onProgress(fraction) while the model downloads,
+ * onEmbedded(done, total) while it works through many texts.
+ */
+export function embed(texts, onProgress, key = 'en', onEmbedded) {
+  if (!texts.length) return Promise.resolve([]);
+  const w = getWorker();
+  if (!w) return embedHere(texts, onProgress, key, onEmbedded);
+  return new Promise((resolve, reject) => {
+    const id = ++jobSeq;
+    let listener = null;
+    if (onProgress) { listener = (p) => onProgress(p); downloadListeners.add(listener); }
+    const done = (fn) => (v) => { if (listener) downloadListeners.delete(listener); fn(v); };
+    pending.set(id, { texts, onProgress, key, onEmbedded, resolve: done(resolve), reject: done(reject) });
+    w.postMessage({ id, model: (EMBED_MODELS[key] || EMBED_MODELS.en).id, texts });
+  });
 }
 
 export const embedText = (it) => `${it.t}. ${it.s || ''}`.slice(0, 1000);
