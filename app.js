@@ -1793,7 +1793,7 @@ function headerSub() {
   const unread = unreadOf(all);
   const v = S.view;
   if (v.type === 'starred') return `${all.length} starred`;
-  if (v.type === 'smart') return `${unread} unread · a smart folder: sorted automatically from what the feeds say about each article`;
+  if (v.type === 'smart') return `${unread} unread · smart folder`;
   if (v.type === 'search') return v.status || `${all.length} results, best matches first`;
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);

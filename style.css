@@ -633,3 +633,55 @@ body.inv-open .inv-panel, .inv-ask { background: var(--side); }
 #sidebar { background: var(--nav-bg); border-right: 1px solid var(--border); }
 #sidebar .nav-item:hover:not(.active) { background: var(--nav-hover); }
 #sidebar .add-btn { background: var(--bg); }
+
+/* ---------- the articles take centre stage ----------
+   Narrower sidebar and investigation panel, a one-line header with compact
+   commands, and articles using the width they get. */
+:root { --nav-w: 232px; }
+#sidebar { padding: 10px 6px 28px; font-size: 14px; }
+#sidebar .nav-item { min-height: 30px; padding-top: 3px; padding-bottom: 3px; gap: 7px; }
+#sidebar .nav-item[data-hue] .ico { width: 22px; height: 22px; border-radius: 6px; font-size: 13px; }
+#sidebar .nav-section { margin-top: 14px; font-size: 11px; }
+#sidebar .add-btn { margin-bottom: 8px; padding: 8px 16px; }
+body.inv-open .inv-panel { width: clamp(300px, 26vw, 400px); }
+main { padding: 0 20px 80px; }
+
+/* Header: title and commands share a row when there's room. */
+.view-header { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 6px; padding: 10px 0 8px; }
+.vh-title { flex: 1 1 220px; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 10px; }
+.vh-title h1 { font-size: 20px; }
+.vh-title .sub { margin: 0; font-size: 13px; }
+.vh-title .feed-addr { flex-basis: 100%; margin: 2px 0 0; font-size: 12px; }
+.vh-actions { flex: 0 1 auto; gap: 6px; align-items: center; }
+.vh-actions button, .vh-actions details.menu > summary, .vh-actions .seg button { padding: 4px 10px; font-size: 13px; }
+.view-header > .brief { flex-basis: 100%; max-width: none; margin-top: 4px; }
+.view-header > .new-items { margin: 0; padding: 4px 12px; font-size: 13px; }
+
+/* Articles: the text uses the width (up to a comfortable line length), commands are compact. */
+.body { padding: 6px 16px 18px 16px; max-width: none; }
+.body h2, .body .meta, .body .content, .body .actions, .body .ai-out, .body .related { max-width: 82ch; }
+.body .content { font-size: 18px; }
+.actions { gap: 6px; margin-top: 14px; padding-top: 10px; }
+.actions > button, .actions > a.button { padding: 5px 11px; font-size: 13.5px; }
+
+@media (max-width: 1100px) {
+  /* Less room: smaller commands. */
+  .vh-actions .seg button, .vh-actions > button { font-size: 12.5px; padding: 4px 8px; }
+}
+/* A medium-width window with an investigation open: the sidebar tucks away
+   behind ☰ (as on phones), so the articles keep the middle. */
+@media (min-width: 861px) and (max-width: 1360px) {
+  body.inv-open #menuBtn { display: inline-flex; }
+  body.inv-open #sidebar {
+    position: fixed; top: var(--top-h); left: 0; bottom: 0; z-index: 30; height: auto; align-self: auto;
+    width: 280px; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); display: block;
+  }
+  body.inv-open.nav-open #sidebar { transform: none; }
+  body.inv-open .scrim { display: block; position: fixed; inset: var(--top-h) 0 0 0; z-index: 25; background: rgba(0,0,0,.25); }
+}
+@media (max-width: 860px) {
+  .view-header { flex-direction: column; align-items: stretch; }
+  .vh-actions { width: 100%; }
+  .body { padding: 6px 4px 16px; }
+  .body .content { font-size: 17px; }
+}
