@@ -9,7 +9,7 @@
 // moves everything to another device.
 
 import { classify, smartInfo, wordCount, mediaKind, LANGS, TOPICS, META } from './smart.js';
-import { decodeVector, encodeVector, dot, embed as embedWith, embedText, EMBED_MODELS, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
+import { decodeVector, encodeVector, dot, embed as embedWith, embedText, EMBED_MODELS, askAI, askGrokLive, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const PAGE = 60;
 const OWN_ITEMS_PER_FEED = 80;   // at most, per feed of your own
@@ -242,6 +242,7 @@ function loadState() {
   S.read = store.get('read', {});
   S.starred = store.get('starred', {});
   S.topics = store.get('topics', []);
+  S.invs = store.get('investigations', []).map((x) => ({ ...x }));
   S.collapsed = store.get('collapsed', {});
   S.days = store.get('days', []);
   S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
@@ -1636,8 +1637,6 @@ async function runSearch(q) {
       v.pending = next;
       v.status = `${added} more matches found in your feeds${last ? '' : ' (still checking)'}`;
       renderHeaderCounts();
-      const sub = $('#viewHeader .sub');
-      if (sub) sub.insertAdjacentHTML('beforeend', ' · <button class="linkish" data-act="showpending">Show them</button>');
       continue;
     }
     Object.assign(v, next);
@@ -1679,6 +1678,7 @@ function renderSidebar() {
     if (S.vectorsState === 'ready' || S.vectorsState === 'missing') n = count(unreadOf(topicMatches(t).items));
     html += `<a class="nav-item${active('topic', t.id)}" href="#/topic/${t.id}"><span class="ico">✨</span><span class="name">${esc(t.name)}</span>${n}</a>`;
   }
+  html += invSidebarHTML(active, count);
   html += `<div class="nav-section"><span>Subscriptions</span></div>`;
   const names = [...folders.keys()].sort((a, b) => (a === RETIRED) - (b === RETIRED) || (a === '') - (b === '') || a.localeCompare(b));
   for (const name of names) {
@@ -1724,9 +1724,11 @@ function smartSidebarHTML(active, count) {
   }).join('');
 }
 
+// The header line, plus "Show them" when a search found more matches while you read.
+const headerSubHTML = () => esc(headerSub()) + (S.view.pending ? ' · <button class="linkish" data-act="showpending">Show them</button>' : '');
 function renderHeaderCounts() {
   const el = $('#viewHeader .sub');
-  if (el) el.textContent = headerSub();
+  if (el) el.innerHTML = headerSubHTML();
 }
 
 function headerSub() {
@@ -1755,7 +1757,7 @@ function renderHeader() {
   h.innerHTML = `
     <div class="vh-title">
       <h1>${feed ? avatar(feed, true) : ''}${esc(viewTitle())}</h1>
-      <p class="sub">${esc(headerSub())}</p>
+      <p class="sub">${headerSubHTML()}</p>
       ${feed ? `<p class="feed-addr"><span title="This feed's address">${esc(feed.url)}</span>${feed.fetchUrl ? ` <span class="muted">→ now ${esc(feed.fetchUrl)}</span>` : ''}${feed.via ? ` <span class="muted">· from ${esc(feed.via)}</span>` : ''} <button class="linkish" data-act="copyaddr">Copy</button></p>` : ''}
     </div>
     <div class="vh-actions">
@@ -1765,6 +1767,7 @@ function renderHeader() {
       ${v.type !== 'starred' ? `<details class="menu"><summary class="button" title="Mark as read (Shift+A marks all)">✓ Mark read ▾</summary><div class="menu-list"><button data-act="markall">All</button><button data-act="markold" data-days="1">Older than a day</button><button data-act="markold" data-days="7">Older than a week</button></div></details>` : ''}
       ${v.type === 'topic' ? `<button data-act="renametopic">✎ Rename topic</button>` : ''}
       <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
+      ${v.type === 'search' || v.type === 'topic' || (v.type === 'feed' && !!(bingNewsQuery(feed?.url) || googleNewsQuery(feed?.url))) ? `<button data-act="investigate" class="ai" title="Dig into this with an AI assistant on the side (Grok can search X)">🕵️ Investigate</button>` : ''}
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
       ${v.type === 'folder' && v.id === RETIRED && S.feeds.some((f) => f.retired) ? `<button data-act="unsubretired" class="ghost danger">Delete all retired feeds</button>` : ''}
@@ -1808,6 +1811,7 @@ function bodyHTML(it) {
       <button data-act="fullarticle" title="Get the whole article through the relay, without ads or trackers">📄 Full article</button>
       <button data-act="summarize" class="ai">✨ Summarize</button>
       <button data-act="related">🔗 More like this</button>
+      <button data-act="digdeeper" class="ai" title="Investigate this story with an AI assistant on the side (Grok can search X)">🕵️ Dig deeper</button>
       <button data-act="share">Share</button>
     </div>
     <div class="ai-out" hidden></div>
@@ -2260,6 +2264,375 @@ async function share(article) {
   } catch { /* cancelled */ }
 }
 
+// ---------- investigations: dig into a subject with an AI assistant ----------
+//
+// An investigation is a subject you're digging into: a side panel where you
+// question an assistant about the articles in your reader, with Grok also
+// searching X and the web; and it can follow the subject (an AI topic, a news
+// search feed, and an X watch), opening with what's new since you last looked.
+// Everything is kept on this device. Questions go only to the assistant you use.
+
+const INV_ARTICLES = 15;      // articles given to the assistant with each question
+const X_RECHECK_MS = 30 * 60e3; // an X watch checks again on opening after 30 minutes
+
+const invById = (id) => S.invs.find((x) => x.id === id);
+// Only what's worth keeping: not the working state of a question in progress.
+const saveInvs = () => store.set('investigations', S.invs.map(({ _pool, abort, busy, busyText, sinceLast, ...keep }) => keep));
+const grokKey = () => S.settings.keys.xai || '';
+
+/** The assistant an investigation uses: Grok when you have its key (it can search X), else your pick. */
+function invAssistant() {
+  if (grokKey()) return { p: provider('xai'), key: grokKey(), model: S.settings.models.xai || 'auto', live: true };
+  return { ...ai(), live: false };
+}
+
+/** Articles in your reader about the investigation, best first (cached until articles change). */
+function invPool(inv) {
+  const key = `${S.version}|${S.settings.threshold}|${modelKey()}`;
+  if (inv._pool?.key === key) return inv._pool.items;
+  const qv = inv.qv && inv.qvModel === modelKey() ? Float32Array.from(inv.qv) : null;
+  const phrase = wordRe(inv.query.trim());
+  const words = inv.query.trim().split(/\s+/).filter((w) => w.length > 2).map(wordRe);
+  const scored = [];
+  for (const it of S.items) {
+    const hay = `${it.t} ${it.s}`;
+    let score = 0;
+    const v = qv && S.vectors.get(it.id);
+    if (v) score = dot(qv, v);
+    if (phrase.test(hay)) score = Math.max(score, 0.99);
+    else if (words.length > 1 && words.every((w) => w.test(hay))) score = Math.max(score, 0.6);
+    if (it.id === inv.seed) score = 2;
+    if (inv.follow?.feedId && it.f === inv.follow.feedId) score = Math.max(score, 0.7);
+    if (score >= S.settings.threshold) scored.push([it, score]);
+  }
+  scored.sort((a, b) => b[1] - a[1]);
+  inv._pool = { key, items: scored.map(([it]) => it) };
+  return inv._pool.items;
+}
+
+/** New articles about it since you last looked. */
+const invNew = (inv) => (inv.lastOpened ? invPool(inv).filter((it) => it.d > inv.lastOpened) : []);
+
+/** Starts (or reopens) an investigation of a search, a topic or an article. */
+async function startInvestigation({ query, name, articleId }) {
+  query = query.trim();
+  let inv = S.invs.find((x) => x.query.toLowerCase() === query.toLowerCase());
+  if (!inv) {
+    inv = { id: hash(query + Date.now()), name: (name || query).replace(/^./, (c) => c.toUpperCase()).slice(0, 80), query, created: Date.now(), lastOpened: 0, follow: {}, thread: [], ...(articleId ? { seed: articleId } : {}) };
+    S.invs.unshift(inv);
+    saveInvs();
+  }
+  openInvestigation(inv.id);
+  // Its meaning, for finding related articles (in the background; word matches work meanwhile).
+  if (!inv.qv || inv.qvModel !== modelKey()) {
+    try {
+      const seed = articleId && (S.byId.get(articleId) || S.starred[articleId]);
+      const [qv] = await embed([seed ? embedText(seed) : query]);
+      inv.qv = Array.from(qv, (x) => +x.toFixed(4));
+      inv.qvModel = modelKey();
+      delete inv._pool;
+      saveInvs();
+      if (S.invOpen === inv.id) renderInv();
+      renderSidebar();
+    } catch (e) { console.warn('Investigation vector', e); }
+  }
+}
+
+function openInvestigation(id) {
+  const inv = invById(id);
+  if (!inv) return;
+  S.invOpen = id;
+  $('#invFab').hidden = true;
+  document.body.classList.add('inv-open');
+  // What changed since last time, worked out before it's marked as seen.
+  inv.sinceLast = inv.lastOpened ? { at: inv.lastOpened, items: invNew(inv).slice(0, 12) } : null;
+  inv.lastOpened = Date.now();
+  saveInvs();
+  renderInv();
+  renderSidebar();
+  $('#invPanel').focus();
+  // Watching X: check for news there too, at most every 30 minutes.
+  if (inv.follow?.x && grokKey() && Date.now() - (inv.xChecked || 0) > X_RECHECK_MS && !inv.busy) askInv(inv, '', 'updates');
+}
+
+function minimizeInvestigation() {
+  const inv = invById(S.invOpen);
+  closeInvestigation();
+  if (!inv) return;
+  const fab = $('#invFab');
+  fab.dataset.inv = inv.id;
+  fab.textContent = `🕵️ Back to “${inv.name.length > 28 ? inv.name.slice(0, 27) + '…' : inv.name}”`;
+  fab.hidden = false;
+}
+
+function closeInvestigation() {
+  const fab = $('#invFab');
+  if (fab) fab.hidden = true;
+  S.invOpen = null;
+  document.body.classList.remove('inv-open');
+  $('#invPanel').innerHTML = '';
+  renderSidebar();
+}
+
+/** Plain text answers with [n] article citations, links, bullets, headings and bold. */
+function formatInv(text, articles) {
+  const links = [];
+  let t = esc(text)
+    // Markdown links and bare links, kept aside so other formatting leaves them alone.
+    .replace(/\[([^\]\n]{1,200})\]\((https?:\/\/[^\s)]+)\)/g, (m, label, url) => { links.push([label, url]); return `\u0000${links.length - 1}\u0000`; })
+    .replace(/(^|[\s(])(https?:\/\/[^\s)<]+)/g, (m, pre, url) => { links.push([null, url.replace(/[.,;:]+$/, '')]); return `${pre}\u0000${links.length - 1}\u0000`; });
+  t = t.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|\s)\*(\S[^*\n]*?)\*(?=\s|$)/g, '$1<i>$2</i>');
+  let html = t.split('\n').map((line) => {
+    if (/^\s*#{1,4}\s+/.test(line)) return `<h4>${line.replace(/^\s*#{1,4}\s+/, '')}</h4>`;
+    if (/^\s*([-•*]|\d+[.)])\s+/.test(line)) return `<li>${line.replace(/^\s*([-•*]|\d+[.)])\s+/, '')}</li>`;
+    return line.trim() ? `<p>${line}</p>` : '';
+  }).join('');
+  html = html.replace(/(<li>.*?<\/li>)+/g, (m) => `<ul>${m}</ul>`);
+  html = html.replace(/\[(\d+)\]/g, (m, n) => { const it = articles?.[n - 1]; return it ? `<a href="#" class="cite" data-open="${esc(it.id)}" title="${esc(it.t)}">${n}</a>` : m; });
+  return html.replace(/\u0000(\d+)\u0000/g, (m, k) => {
+    const [label, raw] = links[+k];
+    const url = safeUrl(raw.replace(/&amp;/g, '&'));
+    if (!url) return esc(label || raw);
+    return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${label || esc(linkLabel(url))}</a>`;
+  });
+}
+
+/** A short name for a link: @handle for X posts, the site otherwise. */
+function linkLabel(url) {
+  try {
+    const u = new URL(url);
+    if (/(^|\.)(x|twitter)\.com$/.test(u.hostname)) { const h = u.pathname.split('/')[1]; return h && !['i', 'search', 'hashtag'].includes(h) ? '@' + h : 'X'; }
+    return u.hostname.replace(/^www\./, '');
+  } catch { return url; }
+}
+/** The video id of a YouTube link ('' if it isn't one). */
+function ytId(url) {
+  try {
+    const u = new URL(url);
+    const h = u.hostname.replace(/^(www|m|music)\./, '');
+    const id = h === 'youtu.be' ? u.pathname.slice(1) : h === 'youtube.com' ? (u.searchParams.get('v') || (/^\/(shorts|live|embed)\/([\w-]{11})/.exec(u.pathname) || [])[2] || '') : '';
+    return /^[\w-]{11}$/.test(id) ? id : '';
+  } catch { return ''; }
+}
+const isXLink = (url) => /^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\//i.test(url);
+
+function invSourcesHTML(msg) {
+  const arts = (msg.articles || []).map((id) => S.byId.get(id) || S.starred[id]).filter(Boolean);
+  const cited = new Set([...msg.text.matchAll(/\[(\d+)\]/g)].map((m) => +m[1]));
+  const usedArts = arts.map((it, k) => [it, k + 1]).filter(([, n]) => cited.has(n));
+  const links = msg.links || [];
+  if (!usedArts.length && !links.length) return '';
+  // Videos without a title: take the name the answer gives it (its bold title or link text).
+  const vids = links.filter((l) => ytId(l.url)).map((l) => {
+    if (l.title) return l;
+    const line = msg.text.split('\n').find((x) => x.includes(ytId(l.url))) || '';
+    const name = /\*\*(.+?)\*\*/.exec(line)?.[1] || /\[([^\]]+)\]\(/.exec(line)?.[1] || line.replace(/^\s*[-*•\d.)]+\s*/, '').split(/\s+[—–-]\s+|https?:/)[0].trim();
+    return { ...l, title: name.slice(0, 120) };
+  });
+  const xs = links.filter((l) => isXLink(l.url));
+  const web = links.filter((l) => !isXLink(l.url) && !ytId(l.url));
+  const li = (l, ico) => `<li><a href="${esc(safeUrl(l.url) || '#')}" target="_blank" rel="noopener noreferrer"><span class="src-ico">${ico}</span>${esc(l.title || linkLabel(l.url))}</a>${l.title ? ` <span class="muted">${esc(linkLabel(l.url))}</span>` : ''}</li>`;
+  return `<details class="inv-sources"${msg === S.invs.find((x) => x.id === S.invOpen)?.thread.at(-1) ? ' open' : ''}><summary>Sources: ${[
+    usedArts.length ? `${usedArts.length} from your feeds` : '', vids.length ? `${vids.length} video${vids.length === 1 ? '' : 's'}` : '', xs.length ? `${xs.length} on X` : '', web.length ? `${web.length} on the web` : '',
+  ].filter(Boolean).join(' · ')}</summary>
+    ${vids.length ? `<div class="yt-grid">${vids.map((l) => { const id = ytId(l.url); return `<div class="yt-item"><button class="yt-card" data-act="invplay" data-yt="${id}" aria-label="Play ${esc(l.title || 'video')}"><img src="https://i.ytimg.com/vi/${id}/mqdefault.jpg" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="yt-play" aria-hidden="true">▶</span></button><a href="${esc(safeUrl(l.url))}" target="_blank" rel="noopener noreferrer">${esc(l.title || 'Watch on YouTube')}</a></div>`; }).join('')}</div>` : ''}
+    <ul>
+    ${usedArts.map(([it, n]) => `<li><a href="#" data-open="${esc(it.id)}"><span class="src-ico">${n}</span>${esc(it.t)}</a> <span class="muted">${esc(S.feedById.get(it.f)?.title || '')} · ${ago(it.d)}</span></li>`).join('')}
+    ${xs.map((l) => li(l, '𝕏')).join('')}${web.map((l) => li(l, '🌐')).join('')}</ul></details>`;
+}
+
+const INV_PROMPTS = [
+  ['x', "𝕏 What's X saying?", "What are people on X saying about this right now? Eyewitnesses, officials, journalists and experts first. Quote the key posts with their account and time, and say what's confirmed and what's only claimed."],
+  ['youtube', '▶️ YouTube videos', 'Search YouTube for videos about this: news reports, eyewitness footage, official briefings and expert analysis. List up to 8, newest first, each with its title, channel, date and youtube.com link, and one line on what it shows and how trustworthy it looks. Flag re-uploads, old footage passed off as new, and AI-made videos.'],
+  ['', '🧭 Timeline', 'Build a timeline of what happened, with dates and times, citing a source for each step.'],
+  ['', '👥 Who & what', 'Who and what are involved: people, organisations, places, vehicles or aircraft, companies? One line each on their role, with sources.'],
+  ['', '⚖️ Where sources disagree', 'Where do the sources disagree or contradict each other (numbers, causes, names, timing)? Which seems most reliable and why?'],
+  ['', '❓ Still unknown', "What isn't known yet, and what should I look for next? Suggest primary sources (official statements, records, data) I can check."],
+];
+
+function renderInv() {
+  const box = $('#invPanel');
+  const inv = invById(S.invOpen);
+  if (!box || !inv) return;
+  const a = invAssistant();
+  const pool = invPool(inv);
+  const f = inv.follow || {};
+  const since = inv.sinceLast;
+  const topic = f.topicId && S.topics.find((t) => t.id === f.topicId);
+  const feed = f.feedId && S.feedById.get(f.feedId);
+  box.innerHTML = `
+    <header class="inv-head">
+      <div class="inv-title"><span aria-hidden="true">🕵️</span><h2>${esc(inv.name)}</h2><button class="mini" data-act="invrename" title="Rename" aria-label="Rename investigation">✎</button></div>
+      <button class="icon-btn" data-act="invclose" aria-label="Close investigation" title="Close (Esc)">✕</button>
+    </header>
+    <div class="inv-scroll" id="invScroll">
+      <p class="inv-meta">${pool.length} article${pool.length === 1 ? '' : 's'} in your reader · <a href="#/search/${encodeURIComponent(inv.query)}">show them</a></p>
+      <div class="inv-follow" role="group" aria-label="Follow this subject">
+        <span class="muted">Follow:</span>
+        <button class="chip${topic ? ' on' : ''}" data-act="invfollow" data-what="topic" aria-pressed="${!!topic}" title="An AI topic in the sidebar collects new articles about this from all your feeds">✨ AI topic</button>
+        <button class="chip${feed ? ' on' : ''}" data-act="invfollow" data-what="feed" aria-pressed="${!!feed}" title="A news search feed for “${esc(inv.query)}”">📰 News feed</button>
+        <button class="chip${f.x ? ' on' : ''}" data-act="invfollow" data-what="x" aria-pressed="${!!f.x}" title="${grokKey() ? 'Grok checks X and the web for news when you open this' : 'Needs a Grok (xAI) key in ⚙ Settings'}">𝕏 Watch X</button>
+      </div>
+      ${since ? `<div class="inv-card"><h3>Since you last looked <span class="muted">(${agoText(since.at)})</span></h3>
+        ${since.items.length ? `<ul>${since.items.map((it) => `<li><a href="#" data-open="${esc(it.id)}">${esc(it.t)}</a> <span class="muted">${esc(S.feedById.get(it.f)?.title || '')} · ${ago(it.d)}</span></li>`).join('')}</ul>` : '<p class="muted">No new articles in your feeds.</p>'}
+        ${grokKey() ? `<button data-act="invupdates" ${inv.busy ? 'disabled' : ''}>𝕏 What's new on X & the web</button>` : ''}</div>` : ''}
+      ${inv.thread.length ? '' : `<div class="inv-card intro"><p>Ask anything about <b>${esc(inv.name)}</b>. ${a.live
+        ? 'Grok reads the articles in your reader and <b>searches X and the web</b> live, with links to every post and page it used.'
+        : `${esc(a.p.name)} answers from the articles in your reader. <b>To search X and the web live, add a Grok (xAI) key</b> in ⚙ Settings.`}</p></div>`}
+      <div class="inv-thread">${inv.thread.map((m, k) => m.role === 'user'
+        ? `<div class="inv-q">${esc(m.label || m.text)}</div>`
+        : `<div class="inv-a${m.error ? ' error' : ''}" data-k="${k}">${m.error ? `<p>${esc(m.text)}</p>` : formatInv(m.text, (m.articles || []).map((id) => S.byId.get(id) || S.starred[id]))}
+          ${m.error ? '' : invSourcesHTML(m)}<p class="via">${esc(m.by || '')}${m.searches ? ` · ${m.searches} live search${m.searches === 1 ? '' : 'es'}` : ''} · ${ago(m.at)}</p></div>`).join('')}
+        ${inv.busy ? `<div class="inv-a working" id="invLive"><p class="loading">${esc(inv.busyText || 'Thinking…')}</p></div>` : ''}</div>
+    </div>
+    <div class="inv-ask">
+      <div class="inv-prompts">${INV_PROMPTS.filter(([x]) => !x || a.live).map(([, label, q], k) => `<button class="chip" data-act="invprompt" data-k="${k}" ${inv.busy ? 'disabled' : ''}>${label}</button>`).join('')}</div>
+      <form id="invForm" class="inv-form">
+        <textarea id="invInput" rows="2" placeholder="Ask about ${esc(inv.name)}…" aria-label="Your question"></textarea>
+        ${inv.busy ? '<button type="button" data-act="invstop">Stop</button>' : '<button type="submit" class="primary">Ask</button>'}
+      </form>
+      <p class="inv-foot">${a.live ? '🔒 Questions go only to xAI with your key. Grok bills each X or web search it makes.' : `🔒 Questions go only to ${esc(a.p.name)} with your key.`}
+        <button class="linkish" data-act="invexport">Export notes</button> · <button class="linkish danger" data-act="invdelete">Delete</button></p>
+    </div>`;
+  const sc = $('#invScroll');
+  if (sc) sc.scrollTop = sc.scrollHeight;
+}
+
+/** Asks the investigation's assistant. mode: '' (a question), 'updates' (what's new). */
+async function askInv(inv, question, mode = '', label) {
+  const a = invAssistant();
+  if (!a.key) { needKey(); return; }
+  if (inv.busy) return;
+  const pool = invPool(inv);
+  const articles = pool.slice(0, INV_ARTICLES);
+  const since = inv.xChecked || inv.created;
+  if (mode === 'updates') {
+    question = `What's new about this since ${new Date(since).toUTCString()}? Search X and the web for anything newer, and check the articles below. Lead with what changed; say plainly if nothing important did.`;
+    label = `𝕏 What's new since ${agoText(since)}?`;
+  }
+  const listing = articles.map((it, k) => `[${k + 1}] ${it.t} — ${S.feedById.get(it.f)?.title || ''}, ${new Date(it.d).toUTCString()}\n${safeUrl(it.l) || ''}\n${(it.s || '').slice(0, 300)}`).join('\n\n');
+  const system = `You are an open-source intelligence (OSINT) research assistant inside Sala Reader, an RSS reader. The reader is investigating: "${inv.query}".
+Today is ${new Date().toUTCString()}.
+Be precise and sceptical: separate what's confirmed (by officials or several independent sources) from claims and rumours, give dates and times, name who said what, and point out contradictions. Prefer primary sources.
+Cite the reader's articles by number in square brackets, like [2].${a.live ? ' You can search X and the web: do so when it helps, and give the link of every post or page you rely on (X posts as their x.com links, with the account name).' : ' You cannot browse; answer from the articles below and say when they don\'t cover something.'}
+Write plain text with short paragraphs, "- " bullets and **bold** for key facts. No tables.
+
+Articles in the reader about this (newest information may be on X or the web):
+${listing || '(none yet)'}`;
+  const history = inv.thread.filter((m) => !m.error).slice(-10).map((m) => ({ role: m.role, content: m.text }));
+  inv.thread.push({ role: 'user', text: question, label, at: Date.now() });
+  inv.busy = true;
+  inv.busyText = a.live ? (mode === 'youtube' ? 'Grok is searching YouTube…' : mode === 'updates' ? 'Grok is checking X and the web…' : 'Grok is reading and searching X and the web…') : `${a.p.name} is reading your articles…`;
+  inv.abort = new AbortController();
+  saveInvs();
+  if (S.invOpen === inv.id) renderInv();
+  let acc = '';
+  const live = () => {
+    const el = S.invOpen === inv.id && $('#invLive');
+    if (el) { el.innerHTML = formatInv(acc, articles); const sc = $('#invScroll'); if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 200) sc.scrollTop = sc.scrollHeight; }
+  };
+  try {
+    const messages = [...history, { role: 'user', content: question }];
+    let res;
+    if (a.live) {
+      const fromDate = mode === 'updates' ? new Date(since - 864e5).toISOString().slice(0, 10) : undefined;
+      const yt = mode === 'youtube' ? { x: false, webDomains: ['youtube.com', 'youtu.be'] } : {};
+      res = await askGrokLive({ apiKey: a.key, model: a.model, system, messages, fromDate, ...yt, onText: (t) => { acc += t; live(); }, signal: inv.abort.signal });
+    } else {
+      res = await askAI({ providerId: a.p.id, apiKey: a.key, model: a.model, system, messages, onText: (t) => { acc += t; live(); }, signal: inv.abort.signal });
+    }
+    inv.thread.push({ role: 'assistant', text: res.text, at: Date.now(), by: `${a.p.name} · ${res.model}`, articles: articles.map((it) => it.id), links: res.citations || [], searches: res.searches || 0 });
+    if (a.live) inv.xChecked = Date.now();
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      if (acc) inv.thread.push({ role: 'assistant', text: acc + '\n\n(stopped)', at: Date.now(), by: a.p.name, articles: articles.map((it) => it.id) });
+      else inv.thread.pop();
+    } else {
+      const msg = /dynamically imported module|Importing a module script failed/i.test(e.message) ? "Couldn't load the AI library. Check your connection or ad blocker and try again." : e.message;
+      inv.thread.push({ role: 'assistant', text: msg, at: Date.now(), error: true });
+    }
+  } finally {
+    inv.busy = false;
+    delete inv.abort;
+    saveInvs();
+    if (S.invOpen === inv.id) renderInv();
+    renderSidebar();
+  }
+}
+
+async function toggleInvFollow(inv, what) {
+  inv.follow ??= {};
+  const f = inv.follow;
+  try {
+    if (what === 'topic') {
+      const existing = f.topicId && S.topics.find((t) => t.id === f.topicId);
+      if (existing) { S.topics = S.topics.filter((t) => t.id !== existing.id); store.set('topics', S.topics); delete f.topicId; toast('Stopped following as an AI topic'); }
+      else { toast('Making an AI topic…'); const t = await createTopic(inv.query); t.name = inv.name; store.set('topics', S.topics); f.topicId = t.id; toast(`✨ “${inv.name}” is now an AI topic in the sidebar`); }
+    } else if (what === 'feed') {
+      if (f.feedId && S.feedById.get(f.feedId)) { unsubscribe(f.feedId); delete f.feedId; toast('Unsubscribed from the news search'); }
+      else { toast(`Adding a news search for “${inv.query}”…`); const feed = await addFeed(inv.query, 'Investigations'); f.feedId = feed.id; toast(`📰 Following news about “${inv.query}” (folder Investigations)`); }
+    } else if (what === 'x') {
+      if (!f.x && !grokKey()) { toast('Watching X needs a Grok (xAI) API key: add it in ⚙ Settings.', 5000); return; }
+      f.x = !f.x;
+      toast(f.x ? '𝕏 Watching X: Grok checks for news when you open this (every 30 minutes at most)' : 'Stopped watching X');
+    }
+  } catch (e) {
+    const existing = /already following this search/i.test(e.message) && S.feeds.find((x) => x.url === newsSearchUrl(inv.query));
+    if (existing) f.feedId = existing.id; else toast(e.message, 5000);
+  }
+  delete inv._pool;
+  saveInvs();
+  renderSidebar();
+  if (S.invOpen === inv.id) renderInv();
+}
+
+function exportInv(inv) {
+  const lines = [`# ${inv.name}`, '', `Investigation of “${inv.query}”, started ${new Date(inv.created).toLocaleString()}. Exported from Sala Reader ${new Date().toLocaleString()}.`, ''];
+  for (const m of inv.thread) {
+    if (m.role === 'user') { lines.push(`## ${m.label || m.text}`, ''); continue; }
+    lines.push(m.text, '');
+    const arts = (m.articles || []).map((id) => S.byId.get(id) || S.starred[id]);
+    const cited = [...new Set([...m.text.matchAll(/\[(\d+)\]/g)].map((x) => +x[1]))].sort((x, y) => x - y);
+    const src = [...cited.map((n) => arts[n - 1] && `[${n}] ${arts[n - 1].t}: ${arts[n - 1].l}`).filter(Boolean), ...(m.links || []).map((l) => `- ${l.title || linkLabel(l.url)}: ${l.url}`)];
+    if (src.length) lines.push('Sources:', ...src, '');
+    if (m.by) lines.push(`_${m.by}, ${new Date(m.at).toLocaleString()}_`, '');
+  }
+  download(`${inv.name.replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 60) || 'investigation'}.md`, lines.join('\n'), 'text/markdown');
+}
+
+function invAction(act, btn) {
+  const inv = invById(S.invOpen);
+  if (!inv) return false;
+  switch (act) {
+    case 'invclose': closeInvestigation(); return true;
+    case 'invrename': { const n = prompt('Name this investigation', inv.name); if (n?.trim()) { inv.name = n.trim().slice(0, 80); saveInvs(); renderInv(); renderSidebar(); } return true; }
+    case 'invfollow': toggleInvFollow(inv, btn.dataset.what); return true;
+    case 'invupdates': askInv(inv, '', 'updates'); return true;
+    case 'invprompt': { const [kind, label, q] = INV_PROMPTS.filter(([x]) => !x || invAssistant().live)[+btn.dataset.k]; askInv(inv, q, kind === 'youtube' ? 'youtube' : '', label); return true; }
+    case 'invplay': {
+      // Plays in the panel from YouTube's no-cookie player, only when you ask.
+      const id = btn.dataset.yt;
+      if (/^[\w-]{11}$/.test(id)) btn.outerHTML = `<div class="yt-frame"><iframe src="https://www.youtube-nocookie.com/embed/${id}?autoplay=1" title="YouTube video" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>`;
+      return true;
+    }
+    case 'invstop': inv.abort?.abort(); return true;
+    case 'invexport': exportInv(inv); return true;
+    case 'invdelete':
+      if (confirm(`Delete the investigation “${inv.name}” and its notes? (Its AI topic and news feed, if any, stay.)`)) { S.invs = S.invs.filter((x) => x.id !== inv.id); saveInvs(); closeInvestigation(); }
+      return true;
+    default: return false;
+  }
+}
+
+/** Sidebar rows: each investigation with the count of new articles since you last looked. */
+function invSidebarHTML(active, count) {
+  if (!S.invs?.length) return '';
+  return `<div class="nav-section"><span>Investigations</span></div>` + S.invs.map((inv) => {
+    const n = S.invOpen === inv.id ? 0 : invNew(inv).length;
+    return `<a class="nav-item inv${S.invOpen === inv.id ? ' active' : ''}" href="#" data-inv="${esc(inv.id)}"><span class="ico">🕵️</span><span class="name">${esc(inv.name)}</span>${inv.follow?.x ? '<span class="muted" title="Watching X">𝕏</span>' : ''}${count(n)}</a>`;
+  }).join('');
+}
+
 // ---------- fun ----------
 
 function celebrate() {
@@ -2358,7 +2731,7 @@ function exportOPML(onlyFolder) {
 
 // ---------- backup: move everything to another device ----------
 
-const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'collapsed', 'days', 'settings'];
+const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'investigations', 'collapsed', 'days', 'settings'];
 const isPerFeedKey = (k) => k.startsWith('own:') || k.startsWith('vec:');
 
 async function exportBackup(includeKeys) {
@@ -2381,7 +2754,7 @@ async function importBackup(file) {
   const d = backup?.data;
   const bad = backup?.app !== 'salareader' || !isObj(d)
     || ('subs' in d && !Array.isArray(d.subs)) || ['read', 'starred', 'collapsed', 'settings', 'ownItems'].some((k) => k in d && !isObj(d[k]))
-    || ['topics', 'days'].some((k) => k in d && !Array.isArray(d[k]))
+    || ['topics', 'days', 'investigations'].some((k) => k in d && !Array.isArray(d[k]))
     || (d.subs || []).some((s) => !isObj(s) || typeof s.url !== 'string' || typeof s.id !== 'string');
   if (bad) throw new Error("That file isn't a Sala Reader backup, or it's damaged.");
   const n = d.subs?.length ?? 0;
@@ -2467,7 +2840,7 @@ function closeSidebar() { document.body.classList.remove('nav-open'); $('#scrim'
 
 /** Puts the saved values of these keys back into the app state (after another tab saved them). */
 function applyKeys(keys) {
-  const fields = { subs: 'subs', read: 'read', starred: 'starred', topics: 'topics', collapsed: 'collapsed', days: 'days' };
+  const fields = { subs: 'subs', read: 'read', starred: 'starred', topics: 'topics', investigations: 'invs', collapsed: 'collapsed', days: 'days' };
   for (const k of keys) {
     if (fields[k]) S[fields[k]] = store.get(k, k === 'subs' ? null : Array.isArray(S[fields[k]]) ? [] : {});
     else if (k === 'settings') { S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) }; applyTheme(); }
@@ -2492,6 +2865,14 @@ function wire() {
     if (S.view.type === 'home') refreshHome();
   });
 
+  document.addEventListener('submit', (e) => {
+    if (e.target.id !== 'invForm') return;
+    e.preventDefault();
+    const inv = invById(S.invOpen);
+    const q = $('#invInput').value.trim();
+    if (inv && q) askInv(inv, q);
+  });
+
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const q = $('#q').value.trim();
@@ -2514,13 +2895,22 @@ function wire() {
       renderSidebar();
       return;
     }
+    const invRow = e.target.closest('[data-inv]');
+    if (invRow) { e.preventDefault(); if (S.invOpen === invRow.dataset.inv) closeInvestigation(); else openInvestigation(invRow.dataset.inv); closeSidebar(); return; }
     if (e.target.closest('#addBtn')) openAdd();
     if (e.target.closest('#addTopicBtn, #addTopicBtn2')) openTopic();
   });
 
   document.addEventListener('click', (e) => {
     const opener = e.target.closest('[data-open]');
-    if (opener) { e.preventDefault(); openItemAnywhere(opener.dataset.open); return; }
+    if (opener) {
+      e.preventDefault();
+      // On a phone the panel covers the list: tuck it away, with a button to come back.
+      if (S.invOpen && opener.closest('#invPanel') && matchMedia('(max-width: 860px)').matches) minimizeInvestigation();
+      openItemAnywhere(opener.dataset.open);
+      return;
+    }
+    if (e.target.closest('#invFab')) { const id = $('#invFab').dataset.inv; $('#invFab').hidden = true; openInvestigation(id); return; }
     const btn = e.target.closest('[data-act]');
     const article = e.target.closest('article.entry');
     if (btn) {
@@ -2530,6 +2920,19 @@ function wire() {
       if (article && act === 'summarize') { summarize(article); return; }
       if (article && act === 'fullarticle') { showFullArticle(article, e.target.closest('[data-act]')); return; }
       if (article && act === 'related') { related(article); return; }
+      if (article && act === 'digdeeper') {
+        const it = S.byId.get(article.dataset.id) || S.starred[article.dataset.id];
+        if (it) startInvestigation({ query: it.t.replace(/\s+[-–|]\s+[^-–|]{2,40}$/, '').slice(0, 120), name: it.t.slice(0, 80), articleId: it.id });
+        return;
+      }
+      if (act.startsWith('inv') && invAction(act, btn)) return;
+      if (act === 'investigate') {
+        const v = S.view;
+        if (v.type === 'search') startInvestigation({ query: v.q });
+        else if (v.type === 'topic') { const t = S.topics.find((x) => x.id === v.id); if (t) startInvestigation({ query: t.query, name: t.name }).then(() => { const inv = S.invs.find((x) => x.query === t.query); if (inv && !inv.follow?.topicId) { inv.follow = { ...inv.follow, topicId: t.id }; saveInvs(); renderInv(); } }); }
+        else if (v.type === 'feed') { const f = S.feedById.get(v.id); const q = bingNewsQuery(f.url) || googleNewsQuery(f.url) || f.title; if (q) startInvestigation({ query: q }).then(() => { const inv = S.invs.find((x) => x.query === q); if (inv && !inv.follow?.feedId) { inv.follow = { ...inv.follow, feedId: f.id }; saveInvs(); renderInv(); } }); }
+        return;
+      }
       if (article && act === 'share') { share(article); return; }
       switch (act) {
         case 'unread': setViewPref('unreadOnly', true); render(); return;
@@ -2842,6 +3245,13 @@ function wire() {
   document.addEventListener('keydown', (e) => {
     // Keys pressed with nothing focused can come from the document itself.
     const el = e.target instanceof Element ? e.target : document.body;
+    // In the investigation panel: Enter asks (Shift+Enter for a new line), Esc closes it.
+    if (S.invOpen && el.closest('#invPanel')) {
+      if (e.key === 'Enter' && !e.shiftKey && el.id === 'invInput') { e.preventDefault(); $('#invForm').requestSubmit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closeInvestigation(); }
+      return;
+    }
+    if (S.invOpen && e.key === 'Escape' && !document.querySelector('dialog[open]')) { closeInvestigation(); return; }
     // Alt+1–6 switches the AI assistant, like ⌥⌘1–6 in jamalterm.
     if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-6]$/.test(e.code) && !el.closest('input, textarea, [contenteditable]')) {
       e.preventDefault();

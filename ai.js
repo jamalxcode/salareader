@@ -260,10 +260,15 @@ const FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5']);
  * Streams an answer from the chosen assistant. onText(chunk) is called as
  * text arrives. Returns { text, model }. Throws an Error with a friendly message.
  */
-export async function askAI({ providerId, apiKey, model, system, prompt, onText, signal }) {
+/**
+ * Asks an assistant. Either prompt (one question) or messages (a conversation:
+ * [{role: 'user' | 'assistant', content}], starting and ending with 'user').
+ */
+export async function askAI({ providerId, apiKey, model, system, prompt, messages, onText, signal }) {
   const p = provider(providerId);
   if (!apiKey) throw new Error(`Add your ${p.name} API key in ⚙ Settings.`);
-  if (p.id === 'anthropic') return askClaude({ apiKey, model: await resolveModel(p, apiKey, model), system, prompt, onText, signal });
+  messages ??= [{ role: 'user', content: prompt }];
+  if (p.id === 'anthropic') return askClaude({ apiKey, model: await resolveModel(p, apiKey, model), system, messages, onText, signal });
   const resolved = await resolveModel(p, apiKey, model);
   const { OpenAI, client } = await openaiClient(p, apiKey);
   let text = '';
@@ -271,7 +276,7 @@ export async function askAI({ providerId, apiKey, model, system, prompt, onText,
     const stream = await client.chat.completions.create({
       model: resolved,
       stream: true,
-      messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+      messages: [{ role: 'system', content: system }, ...messages],
     }, { signal });
     for await (const chunk of stream) {
       const d = chunk.choices?.[0]?.delta;
@@ -281,6 +286,72 @@ export async function askAI({ providerId, apiKey, model, system, prompt, onText,
   } catch (e) { throw friendlyError(p, e, OpenAI); }
   if (!text) throw new Error(`${p.name} sent an empty answer. Try again or pick another model.`);
   return { text, model: resolved };
+}
+
+// ---------- Grok with live X and web search ----------
+// xAI's Responses API runs the searches on its side (x_search, web_search)
+// and returns the answer with the posts and pages it used.
+
+const GROK_SEARCH_MODEL = 'grok-4-1-fast';
+
+/** Every cited link in a Responses API result, wherever it's reported. */
+function grokCitations(res, text) {
+  const out = new Map();
+  const add = (url, title) => {
+    if (typeof url !== 'string' || !/^https?:\/\//.test(url)) return;
+    if (!out.has(url)) out.set(url, { url, title: title || '' });
+    else if (title && !out.get(url).title) out.get(url).title = title;
+  };
+  for (const c of res?.citations || []) typeof c === 'string' ? add(c) : add(c?.url, c?.title);
+  for (const item of res?.output || []) {
+    for (const part of item?.content || []) for (const a of part?.annotations || []) add(a?.url, a?.title);
+    for (const r of item?.results || item?.action?.sources || []) add(r?.url, r?.title);
+  }
+  for (const m of String(text || '').matchAll(/https?:\/\/[^\s)\]>"]+/g)) add(m[0].replace(/[.,;:]+$/, ''));
+  return [...out.values()];
+}
+
+/**
+ * Asks Grok with live search of X (and the web). fromDate (YYYY-MM-DD) limits
+ * X results to newer posts. Returns { text, model, citations, searches }.
+ */
+export async function askGrokLive({ apiKey, model, system, messages, fromDate, web = true, x = true, webDomains, onText, signal }) {
+  const p = provider('xai');
+  if (!apiKey) throw new Error('Add your Grok (xAI) API key in ⚙ Settings to search X.');
+  const { OpenAI, client } = await openaiClient(p, apiKey);
+  const tools = [];
+  if (x) tools.push({ type: 'x_search', ...(fromDate ? { from_date: fromDate } : {}) });
+  // webDomains limits the web search to some sites (e.g. YouTube).
+  if (web) tools.push({ type: 'web_search', ...(webDomains?.length ? { allowed_domains: webDomains } : {}) });
+  const run = async (m) => {
+    let text = '';
+    let final = null;
+    const stream = await client.responses.create({
+      model: m,
+      stream: true,
+      instructions: system,
+      input: messages.map((x) => ({ role: x.role, content: x.content })),
+      tools,
+    }, { signal });
+    for await (const ev of stream) {
+      if (ev.type === 'response.output_text.delta' && ev.delta) { text += ev.delta; onText?.(ev.delta); }
+      else if (ev.type === 'response.completed' || ev.type === 'response.incomplete') final = ev.response;
+      else if (ev.type === 'response.failed' || ev.type === 'error') throw new Error(ev.response?.error?.message || ev.message || 'Grok stopped with an error.');
+    }
+    if (!text && final?.output_text) text = final.output_text;
+    if (!text) throw new Error('Grok sent an empty answer. Try again.');
+    const searches = (final?.output || []).filter((o) => /search/.test(o?.type || '')).length
+      || final?.usage?.server_side_tool_usage_details?.x_search_calls + final?.usage?.server_side_tool_usage_details?.web_search_calls || 0;
+    return { text, model: final?.model || m, citations: grokCitations(final, text), searches: Number(searches) || 0 };
+  };
+  // A model picked in Settings, else xAI's search model; fall back to it if the pick can't search.
+  const picked = model && model !== 'auto' ? model : GROK_SEARCH_MODEL;
+  try { return await run(picked); } catch (e) {
+    if (picked !== GROK_SEARCH_MODEL && OpenAI && e instanceof OpenAI.APIError && [400, 404].includes(e.status)) {
+      try { return await run(GROK_SEARCH_MODEL); } catch (e2) { throw friendlyError(p, e2, OpenAI); }
+    }
+    throw friendlyError(p, e, OpenAI);
+  }
 }
 
 function friendlyError(p, e, OpenAI) {
@@ -305,7 +376,7 @@ function friendlyError(p, e, OpenAI) {
   return e instanceof Error ? e : new Error(String(e));
 }
 
-async function askClaude({ apiKey, model, system, prompt, onText, signal }) {
+async function askClaude({ apiKey, model, system, messages, onText, signal }) {
   const mod = await loadAnthropic();
   const Anthropic = mod.default || mod.Anthropic;
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
@@ -313,7 +384,7 @@ async function askClaude({ apiKey, model, system, prompt, onText, signal }) {
     model,
     max_tokens: 4000,
     system,
-    messages: [{ role: 'user', content: prompt }],
+    messages,
     output_config: { effort: 'low' },
   };
   try {

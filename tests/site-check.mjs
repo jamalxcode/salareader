@@ -251,6 +251,21 @@ await step('accessibility: Settings', async () => {
   await axe(page, 'settings');
   await page.keyboard.press('Escape');
 });
+await step('investigation panel opens, asks, and passes accessibility', async () => {
+  await page.goto(SITE + '/?debug#/search/' + encodeURIComponent('space exploration'));
+  await page.waitForSelector('[data-act="investigate"]');
+  await page.click('[data-act="investigate"]');
+  await page.waitForSelector('#invPanel .inv-head');
+  const meta = await page.$eval('#invPanel .inv-meta', (e) => e.textContent.trim());
+  await axe(page, 'investigation panel');
+  await page.keyboard.press('Escape');
+  const closed = await page.evaluate(() => !document.body.classList.contains('inv-open'));
+  if (!closed) throw new Error('Esc did not close the panel');
+  const listed = await page.$$eval('#sidebar [data-inv]', (a) => a.length);
+  if (!listed) throw new Error('not listed in the sidebar');
+  return `${meta}; listed in the sidebar`;
+});
+
 await step('accessibility: dark theme contrast', async () => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.goto(SITE + '/?debug#/all'); await page.reload(); await page.waitForSelector('article.entry');
