@@ -2432,66 +2432,85 @@ function closeInvestigation() {
   renderSidebar();
 }
 
-/* The separator between the articles and an investigation: drag it (or use
-   the arrow keys) to make the panel wider or narrower. The width is a
-   preference for this device only. Double-click puts it back. */
-const INV_W_KEY = 'salareader:invWidth';
-const INV_MIN = 280, MAIN_MIN = 460;
-function invMaxWidth() {
-  const nav = $('#sidebar');
-  const navW = nav && getComputedStyle(nav).position !== 'fixed' && nav.offsetParent ? nav.offsetWidth : 0;
-  return Math.max(INV_MIN, Math.min(window.innerWidth - navW - MAIN_MIN, window.innerWidth * 0.7));
+/* Separators beside the articles: drag one (or focus it and use the arrow
+   keys) to make the sidebar or an investigation wider or narrower. Widths
+   are a preference for this device only. Double-click puts one back. */
+const MAIN_MIN = 460;
+const PANES = {
+  inv: { handle: '#invResizer', pane: '#invPanel', cssVar: '--inv-w', key: 'salareader:invWidth', min: 280, side: 'right' },
+  nav: { handle: '#navResizer', pane: '#sidebar', cssVar: '--nav-w', key: 'salareader:navWidth', min: 180, maxCap: 440, side: 'left' },
+};
+/** Width the pane is showing as a column (0 when hidden or floating over the page). */
+function columnWidth(sel) {
+  const el = $(sel);
+  return el && el.offsetParent && getComputedStyle(el).position !== 'fixed' ? el.offsetWidth : 0;
 }
-function setInvWidth(w, save = true) {
-  const r = $('#invResizer');
+function paneMax(name) {
+  const c = PANES[name], other = name === 'inv' ? '#sidebar' : '#invPanel';
+  const room = window.innerWidth - columnWidth(other) - MAIN_MIN;
+  return Math.max(c.min, Math.min(room, c.maxCap || window.innerWidth * 0.7));
+}
+function savedWidth(name) { try { const w = +localStorage.getItem(PANES[name].key); return w > 0 ? w : null; } catch { return null; } }
+function setPaneWidth(name, w, save = true) {
+  const c = PANES[name], root = document.documentElement.style;
   if (w == null) {
-    document.documentElement.style.removeProperty('--inv-w');
-    if (save) try { localStorage.removeItem(INV_W_KEY); } catch {}
+    root.removeProperty(c.cssVar);
+    if (save) try { localStorage.removeItem(c.key); } catch {}
   } else {
-    w = Math.round(Math.min(invMaxWidth(), Math.max(INV_MIN, w)));
-    document.documentElement.style.setProperty('--inv-w', w + 'px');
-    if (save) try { localStorage.setItem(INV_W_KEY, String(w)); } catch {}
+    w = Math.round(Math.min(paneMax(name), Math.max(c.min, w)));
+    root.setProperty(c.cssVar, w + 'px');
+    if (save) try { localStorage.setItem(c.key, String(w)); } catch {}
   }
-  const now = $('#invPanel')?.offsetWidth;
-  if (r && now) { r.setAttribute('aria-valuenow', String(now)); r.setAttribute('aria-valuemin', String(INV_MIN)); r.setAttribute('aria-valuemax', String(Math.round(invMaxWidth()))); }
+  const h = $(c.handle), now = $(c.pane)?.offsetWidth;
+  if (h && now) { h.setAttribute('aria-valuenow', String(now)); h.setAttribute('aria-valuemin', String(c.min)); h.setAttribute('aria-valuemax', String(Math.round(paneMax(name)))); }
 }
-function savedInvWidth() { try { const w = +localStorage.getItem(INV_W_KEY); return w > 0 ? w : null; } catch { return null; } }
-function initInvResizer() {
-  const r = $('#invResizer');
-  if (!r) return;
-  if (savedInvWidth()) setInvWidth(savedInvWidth(), false);
-  r.addEventListener('pointerdown', (e) => {
+const restorePane = (name) => { const w = savedWidth(name); if (w) setPaneWidth(name, w, false); };
+const setInvWidth = (w, save) => setPaneWidth('inv', w, save);
+const savedInvWidth = () => savedWidth('inv');
+function initResizer(name) {
+  const c = PANES[name], h = $(c.handle);
+  if (!h) return;
+  // Dragging toward the articles makes the pane wider.
+  const grow = (dx) => (c.side === 'right' ? -dx : dx);
+  restorePane(name);
+  h.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
-    r.setPointerCapture(e.pointerId);
-    const startX = e.clientX, startW = $('#invPanel').offsetWidth;
-    document.body.classList.add('inv-resizing');
+    h.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startW = $(c.pane).offsetWidth;
+    document.body.classList.add('resizing');
+    h.classList.add('dragging');
     let raf = 0, x = startX;
-    const move = (ev) => { x = ev.clientX; if (!raf) raf = requestAnimationFrame(() => { raf = 0; setInvWidth(startW + (startX - x), false); }); };
+    const move = (ev) => { x = ev.clientX; if (!raf) raf = requestAnimationFrame(() => { raf = 0; setPaneWidth(name, startW + grow(x - startX), false); }); };
     const up = () => {
-      r.removeEventListener('pointermove', move);
-      r.removeEventListener('pointerup', up);
-      r.removeEventListener('pointercancel', up);
+      h.removeEventListener('pointermove', move);
+      h.removeEventListener('pointerup', up);
+      h.removeEventListener('pointercancel', up);
       cancelAnimationFrame(raf);
-      document.body.classList.remove('inv-resizing');
-      if (x !== startX) setInvWidth(startW + (startX - x));
+      document.body.classList.remove('resizing');
+      h.classList.remove('dragging');
+      if (x !== startX) setPaneWidth(name, startW + grow(x - startX));
     };
-    r.addEventListener('pointermove', move);
-    r.addEventListener('pointerup', up);
-    r.addEventListener('pointercancel', up);
+    h.addEventListener('pointermove', move);
+    h.addEventListener('pointerup', up);
+    h.addEventListener('pointercancel', up);
   });
-  r.addEventListener('dblclick', () => setInvWidth(null));
-  r.addEventListener('keydown', (e) => {
-    const w = $('#invPanel').offsetWidth, step = e.shiftKey ? 80 : 24;
-    if (e.key === 'ArrowLeft') setInvWidth(w + step);
-    else if (e.key === 'ArrowRight') setInvWidth(w - step);
-    else if (e.key === 'Home') setInvWidth(invMaxWidth());
-    else if (e.key === 'End') setInvWidth(INV_MIN);
+  h.addEventListener('dblclick', () => setPaneWidth(name, null));
+  h.addEventListener('keydown', (e) => {
+    const w = $(c.pane).offsetWidth, step = e.shiftKey ? 80 : 24;
+    if (e.key === 'ArrowLeft') setPaneWidth(name, w + grow(-step));
+    else if (e.key === 'ArrowRight') setPaneWidth(name, w + grow(step));
+    else if (e.key === 'Home') setPaneWidth(name, paneMax(name));
+    else if (e.key === 'End') setPaneWidth(name, c.min);
     else return;
     e.preventDefault(); e.stopPropagation();
   });
-  // A smaller window shouldn't leave the panel crowding out the articles.
-  window.addEventListener('resize', () => { const w = savedInvWidth(); if (w) setInvWidth(w, false); });
+}
+function initResizers() {
+  initResizer('nav');
+  initResizer('inv');
+  // A smaller window shouldn't leave the side columns crowding out the articles.
+  window.addEventListener('resize', () => { restorePane('nav'); restorePane('inv'); });
 }
 
 /** Plain text answers with [n] article citations, links, bullets, headings and bold. */
@@ -3503,7 +3522,7 @@ async function refresh() {
 async function start() {
   await loadStore();
   loadState();
-  initInvResizer();
+  initResizers();
   await moveBodiesOut();
   applyTheme();
   wire();
