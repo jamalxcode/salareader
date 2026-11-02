@@ -1335,7 +1335,7 @@ function renderSidebar() {
     const n = list.reduce((s, f) => s + (unreadByFeed.get(f.id) || 0), 0);
     const closed = S.collapsed[name];
     html += `<div class="folder${closed ? ' closed' : ''}">
-      <div class="nav-item folder-row${active('folder', name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(name)}">▾</button><a href="#/folder/${encodeURIComponent(name)}" class="name">📁 ${esc(name)}</a>${count(n)}</div>
+      <div class="nav-item folder-row${active('folder', name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">📁 ${esc(name)}</a>${count(n)}</div>
       <div class="folder-feeds">${list.map(feedRow).join('')}</div></div>`;
   }
   if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
