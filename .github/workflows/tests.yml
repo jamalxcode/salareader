@@ -1,0 +1,49 @@
+name: Tests
+
+# Every push and pull request: the unit tests, then the browser tests
+# (tests/browser: the site with test data, stand-in feed sites and the relay
+# running relay/worker.js, all on this runner; nothing is fetched from the internet).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/browser/package-lock.json
+
+      - name: Unit tests
+        run: |
+          npm ci --no-audit --no-fund
+          node --test tests/unit/*.test.mjs
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+
+      - name: Install the browser tests
+        working-directory: tests/browser
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Browser tests
+        working-directory: tests/browser
+        run: node run.mjs

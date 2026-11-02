@@ -1,0 +1,8 @@
+<?xml version="1.0"?><opml version="1.0"><body><outline text="Test" title="Test">
+<outline type="rss" text="Gone feed" xmlUrl="http://gone.test/feed"/>
+<outline type="rss" text="Down feed" xmlUrl="http://down.test/feed"/>
+<outline type="rss" text="Blocked feed" xmlUrl="http://block.test/feed"/>
+<outline type="rss" text="UA picky feed" xmlUrl="http://uablock.test/feed"/>
+<outline type="rss" text="Page feed" xmlUrl="http://page.test/feed"/>
+<outline type="rss" text="Quiet feed" xmlUrl="http://quiet.test/feed"/>
+</outline></body></opml>

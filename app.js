@@ -82,6 +82,7 @@ let frozen = false;      // set while erasing or importing, so nothing writes ol
 let warnedSaveFail = false;
 
 async function flush() {
+  if (typeof lazySaves !== 'undefined' && lazySaves.size) runLazySaves();
   clearTimeout(flushTimer);
   if (!dirty.size) return;
   const keys = [...dirty];
@@ -337,7 +338,14 @@ function loadState() {
 // For diagnosing on your own device: open the reader with ?debug to inspect its state in the console.
 if (new URLSearchParams(location.search).has('debug')) window.__salareader = S;
 const saveSettings = () => store.set('settings', S.settings);
-const saveSubs = () => store.set('subs', S.subs);
+// Saving copies the whole list; with many feeds that's costly, so saves of the
+// subscription list are gathered and done once, shortly after (and always before
+// the page closes or anything reads the stored copy).
+const lazySaves = new Map();
+let lazyTimer = 0;
+function runLazySaves() { clearTimeout(lazyTimer); lazyTimer = 0; for (const [k, get] of lazySaves) store.set(k, get()); lazySaves.clear(); }
+function saveSoon(key, get) { lazySaves.set(key, get); if (!lazyTimer) lazyTimer = setTimeout(runLazySaves, 800); }
+const saveSubs = () => saveSoon('subs', () => S.subs);
 const saveOwnFeed = (id) => { if (S.ownItems[id]) store.set('own:' + id, S.ownItems[id]); else store.del('own:' + id); };
 const ai = () => {
   const p = provider(S.settings.aiProvider);
@@ -361,8 +369,9 @@ function avatar(f, big = false) {
 /** Only web links: a feed's javascript: or data: "link" would otherwise run code here. */
 const safeUrl = (u, base) => { if (!u) return ''; try { const x = new URL(u, base); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } };
 const isRead = (id) => id in S.read;
-const strip = (html) => { const d = document.createElement('div'); d.innerHTML = DOMPurifySafe(html); return (d.textContent || '').replace(/\s+/g, ' ').trim(); };
-function DOMPurifySafe(html) { return window.DOMPurify ? window.DOMPurify.sanitize(html) : String(html).replace(/<[^>]+>/g, ' '); }
+const inertParser = new DOMParser();
+/** Text of some HTML. Parsed into an inert document: nothing in it runs or loads. */
+const strip = (html) => { if (!/[<&]/.test(html)) return String(html ?? '').replace(/\s+/g, ' ').trim(); return (inertParser.parseFromString(String(html), 'text/html').body.textContent || '').replace(/\s+/g, ' ').trim(); };
 
 const agoText = (t) => (ago(t) === 'just now' ? 'just now' : `${ago(t)} ago`);
 
@@ -729,6 +738,8 @@ function relayTurn() {
 }
 
 async function fetchFeedText(url, { relayOnly = false, feed = null } = {}) {
+  // Fetched in the background by the installed app since the last update: use that copy.
+  if (feed && !relayOnly) { const pre = await takePrefetched(url, feed); if (pre) return pre; }
   // Try the site directly, unless we already know it blocks web pages.
   if (!relayOnly && feed?.direct !== false) {
     try {
@@ -1073,10 +1084,20 @@ const liveSub = (url) => (S.subs || []).find((s) => s.url === url);
 function articleKey(it) {
   return `${linkKey(it)}|${(it.t || '').trim().toLowerCase()}`;
 }
+const linkKeys = new Map();
 function linkKey(it) {
   if (!it.l) return '';
+  let k = linkKeys.get(it.l);
+  if (k === undefined) {
+    if (linkKeys.size > 300000) linkKeys.clear();
+    k = linkKeyOf(it.l);
+    linkKeys.set(it.l, k);
+  }
+  return k;
+}
+function linkKeyOf(l) {
   try {
-    const u = new URL(it.l);
+    const u = new URL(l);
     for (const k of [...u.searchParams.keys()]) if (/^(utm_|fbclid$|gclid$|mc_|ncid$|guccounter$|ref$|src$|cmpid$)/i.test(k)) u.searchParams.delete(k);
     const q = u.searchParams.toString();
     return `${u.hostname.replace(/^www\./, '')}${u.pathname.replace(/\/+$/, '')}${q ? '?' + q : ''}`.toLowerCase();
@@ -1341,11 +1362,18 @@ function refreshOwnFeeds({ force = false, wait = false, includeRetired = false }
       return force || now >= nextFetchAt(s);
     });
     if (!due.length || stopRefresh) return;
+    // The feeds you read most come first, so the stories you care about arrive first.
+    const score = feedPriority();
+    due.sort((a, b) => (score.get(b.id) || 0) - (score.get(a.id) || 0));
     S.ownProgress = { done: 0, total: due.length };
     renderSidebar();
     let lastPaint = 0;
+    let paintCost = 0;
     const paint = (final) => {
-      if (stopRefresh || (!final && Date.now() - lastPaint < 1500)) return;
+      // Redraw at most every 1.5 s, and less often when a redraw is costly (many feeds),
+      // so the page stays responsive while feeds arrive.
+      if (stopRefresh || (!final && Date.now() - lastPaint < Math.max(1500, paintCost * 12))) return;
+      const t0 = performance.now();
       lastPaint = Date.now();
       rebuild();
       saveSubs();
@@ -1356,9 +1384,12 @@ function refreshOwnFeeds({ force = false, wait = false, includeRetired = false }
       else if (!document.querySelector('#list article.entry')) render();
       else { renderHeaderCounts(); if (final) offerNew(); }
       if (final) vectorsForTopics();
+      paintCost = performance.now() - t0;
     };
     let next = 0;
-    await Promise.all(Array.from({ length: 4 }, async () => {
+    // Requests to the relay are paced anyway; more at once lets sites that can be read
+    // directly (without the relay) arrive in parallel.
+    await Promise.all(Array.from({ length: 8 }, async () => {
       while (next < due.length && !stopRefresh) {
         const f = due[next++];
         try { await fetchOwnFeed(f); } catch (e) { noteFeedError(f, e); }
@@ -1368,6 +1399,7 @@ function refreshOwnFeeds({ force = false, wait = false, includeRetired = false }
     }));
     S.ownProgress = null;
     paint(true);
+    savePrefetchPlan();
   };
   ownRefreshing = (navigator.locks
     // Background refreshes skip if another tab is fetching; an import waits its turn.
@@ -1826,7 +1858,8 @@ function renderSidebar() {
   if (S.ownProgress) html += `<p class="nav-note progress">⟳ Fetching your feeds… ${S.ownProgress.done} of ${S.ownProgress.total}</p>`;
   if (S.abPaused && abState()?.name) html += `<p class="nav-note warn">⏸ Automatic backup paused · <button class="linkish" data-act="resumebackup">Resume</button></p>`;
   html += `<p class="nav-note">${S.index.updated ? `Updated ${agoText(S.index.updated)}` : S.index.missing ? 'Waiting for the first feed update' : ''} · <button class="linkish" data-act="refresh">Refresh</button> · <a href="#/health" class="linkish">🩺 Feed health</a></p>`;
-  nav.innerHTML = html;
+  // Nothing changed (common while feeds refresh): leave the DOM alone.
+  if (html !== S.sidebarHTML) { S.sidebarHTML = html; nav.innerHTML = html; }
 }
 
 // Each topic's colour (see [data-hue] in style.css).
@@ -1917,7 +1950,7 @@ function renderHeader() {
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
       ${v.type === 'folder' && v.id === RETIRED && S.feeds.some((f) => f.retired) ? `<button data-act="unsubretired" class="ghost danger">Delete all retired feeds</button>` : ''}
-      ${feed?.retired ? `<button data-act="keepfeed" data-id="${esc(feed.id)}">↻ Keep trying</button>` : feed?.own && feed.error ? `<button data-act="retry">⟳ Try again</button>` : ''}
+      ${feed?.retired && feed.own ? `<button data-act="keepfeed" data-id="${esc(feed.id)}">↻ Keep trying</button>` : feed?.own && feed.error ? `<button data-act="retry">⟳ Try again</button>` : ''}
       ${feed ? `<button data-act="editfeed">✎ Edit</button>` : ''}
       ${v.type === 'folder' && v.id && v.id !== RETIRED ? `<button data-act="renamefolder">✎ Rename</button><button data-act="sharefolder" title="Save this folder's feeds as an OPML file to share">⇪ Share folder</button><button data-act="deletefolder" class="ghost danger">Delete folder</button>` : ''}
       ${feed ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
@@ -2198,13 +2231,14 @@ function healthNote(f) {
 }
 
 function healthCounts() {
-  const own = S.feeds.filter((f) => f.own);
-  const retired = own.filter((f) => f.retired);
-  const trouble = own.filter((f) => !f.retired && f.error);
-  const quiet = own.filter((f) => quietSince(f));
-  const working = own.length - retired.length - trouble.length;
-  const line = `${S.feeds.length} feeds · ${working + (S.feeds.length - own.length)} working${quiet.length ? ` (${quiet.length} quiet)` : ''} · ${trouble.length} having trouble · ${retired.length} retired`;
-  return { own, retired, trouble, quiet, working, line };
+  // Your own feeds are judged here; the shared catalog's feeds by its daily update, with the same rules.
+  const all = S.feeds;
+  const retired = all.filter((f) => f.retired);
+  const trouble = all.filter((f) => !f.retired && f.error);
+  const quiet = all.filter((f) => quietSince(f));
+  const working = all.length - retired.length - trouble.length;
+  const line = `${all.length} feeds · ${working} working${quiet.length ? ` (${quiet.length} quiet)` : ''} · ${trouble.length} having trouble · ${retired.length} retired`;
+  return { retired, trouble, quiet, working, line };
 }
 
 function healthSummaryHTML() {
@@ -2252,7 +2286,7 @@ function renderRetired() {
        <ul class="retired-list">${list.map((f) => `<li data-feed="${esc(f.id)}">
          <div class="r-main">${avatar(f)}<a href="#/feed/${esc(f.id)}" class="r-title">${esc(f.title)}</a>
            <span class="muted r-why">${f.retiredWhy ? `<b>${esc(f.retiredWhy[0].toUpperCase() + f.retiredWhy.slice(1))}</b>${f.failSince ? ` since ${esc(new Date(f.failSince).toLocaleDateString())}` : ''}: ` : ''}${esc(f.error || '')}</span><span class="muted r-addr">${esc(f.url)}</span></div>
-         <div class="r-actions"><button data-act="keepfeed" data-id="${esc(f.id)}">↻ Keep trying</button><button data-act="unsubone" data-id="${esc(f.id)}" class="ghost danger">Unsubscribe</button></div></li>`).join('')}</ul>`
+         <div class="r-actions">${f.own ? `<button data-act="keepfeed" data-id="${esc(f.id)}">↻ Keep trying</button>` : '<span class="muted">Shared catalog feed: checked again weekly</span>'}<button data-act="unsubone" data-id="${esc(f.id)}" class="ghost danger">Unsubscribe</button></div></li>`).join('')}</ul>`
     : `<div class="empty"><p class="big">📦</p><p>No retired feeds.</p></div>`;
 }
 
@@ -3194,7 +3228,8 @@ function wire() {
     const keys = e.data?.keys;
     if (!Array.isArray(keys) || frozen) return;
     await reloadKeys(keys);
-    applyKeys(keys.filter((k) => !dirty.has(k)));
+    // Keys this tab is about to save itself (or saving lazily) keep this tab's version.
+    applyKeys(keys.filter((k) => !dirty.has(k) && !lazySaves.has(k)));
     rebuild();
     renderSidebar();
     renderHeaderCounts();
@@ -3777,6 +3812,66 @@ function digDeeper(it) {
 
 const copyText = (text, msg) => navigator.clipboard?.writeText(text).then(() => toast(msg)).catch(() => toast("Couldn't copy"));
 
+// ---------- desktop: fresher feeds ----------
+
+/** How much you read each feed lately (reads in the last 2 weeks, and stars): the refresh order. */
+function feedPriority() {
+  const score = new Map();
+  const since = Date.now() - 14 * 864e5;
+  for (const [id, t] of Object.entries(S.read)) {
+    if (t < since) continue;
+    const f = S.byId.get(id)?.f;
+    if (f) score.set(f, (score.get(f) || 0) + 1);
+  }
+  for (const it of Object.values(S.starred)) if (it?.f) score.set(it.f, (score.get(it.f) || 0) + 3);
+  return score;
+}
+
+const PREFETCH_CACHE = 'salareader-prefetch';
+const PREFETCH_MAX_AGE = 12 * 3600e3;
+
+/**
+ * For the installed app's background refresh: the feeds to fetch (most read first)
+ * and how. Kept in this browser's cache storage, which only this site can read.
+ */
+async function savePrefetchPlan() {
+  if (!('caches' in window) || !navigator.serviceWorker?.controller) return;
+  const score = feedPriority();
+  const feeds = (S.subs || []).filter((s) => s.own && !s.retired && (!s.error || s.relayIssue) && !googleNewsQuery(s.url) && !bingNewsQuery(s.url))
+    .sort((a, b) => (score.get(b.id) || 0) - (score.get(a.id) || 0)).slice(0, 300)
+    .map((s) => ({ url: s.fetchUrl || fetchAddress(s.url), direct: s.direct === true }));
+  const own = S.settings.relayMode === 'own';
+  const plan = { relay: relayUrl(), token: own ? S.settings.relayToken || '' : '', feeds, saved: Date.now() };
+  try { await (await caches.open(PREFETCH_CACHE)).put('/__prefetch-plan', new Response(JSON.stringify(plan), { headers: { 'Content-Type': 'application/json' } })); } catch { /* no cache storage */ }
+}
+
+/** A copy of this feed fetched in the background since it was last updated, if any (used once). */
+async function takePrefetched(url, feed) {
+  if (!('caches' in window)) return '';
+  try {
+    const cache = await caches.open(PREFETCH_CACHE);
+    const key = '/__prefetch/' + encodeURIComponent(url);
+    const res = await cache.match(key);
+    if (!res) return '';
+    await cache.delete(key);
+    const at = +res.headers.get('X-Fetched-At') || 0;
+    if (Date.now() - at > PREFETCH_MAX_AGE || at <= (liveSub(feed.url)?.ok || 0)) return '';
+    return await res.text();
+  } catch { return ''; }
+}
+
+/** Installed app (Chrome, Edge): ask to refresh feeds in the background now and then. */
+async function registerBackgroundRefresh() {
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    if (!reg?.periodicSync) return;
+    const perm = await navigator.permissions.query({ name: 'periodic-background-sync' });
+    if (perm.state !== 'granted') return;
+    await reg.periodicSync.register('feeds', { minInterval: 3 * 3600e3 });
+    S.backgroundRefresh = true;
+  } catch { /* not supported here */ }
+}
+
 // ---------- desktop: text size and font ----------
 
 const READ_SIZES = [13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28];
@@ -3891,6 +3986,7 @@ function initDesktop() {
   addEventListener('appinstalled', () => { installEvent = null; showInstall(); toast('Installed: Sala Reader now has its own window', 4000); });
   keepStorage(false);
   showInstall();
+  registerBackgroundRefresh();
   $('#installBtn').addEventListener('click', installApp);
   $('#installApp').addEventListener('click', installApp);
   $('#persistBtn').addEventListener('click', async () => {

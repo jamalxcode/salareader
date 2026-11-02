@@ -177,21 +177,86 @@ export function parseFeed(xml, feedUrl) {
 
 // ---------- fetching ----------
 
+// Like the relay: a plain agent first, then (for sites that turn those away) a browser-style one.
+const AGENTS = ['SalaReader/1.0 (+https://reader.sala.company)', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 SalaReader/1.0'];
+
 async function fetchText(url) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  for (const agent of AGENTS) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        redirect: 'follow',
+        headers: { 'user-agent': agent, accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5' },
+      });
+      if ([401, 403, 406, 429, 503].includes(res.status) && agent === AGENTS[0]) continue;
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+      return decodeFeed(await res.arrayBuffer(), res.headers.get('content-type') || '');
+    } catch (e) {
+      if (e.status) throw e;
+      throw Object.assign(new Error(e.name === 'AbortError' ? 'Timed out' : `Couldn't reach the site (${e.cause?.code || e.message})`), { network: true });
+    } finally { clearTimeout(t); }
+  }
+}
+
+// ---------- dead or alive (the same rules as the reader uses for your own feeds) ----------
+//  gone:    404/410 and no new address found: dead after a day (and at least two tries)
+//  notfeed: the address shows a web page or something that isn't a feed: dead after 3 days
+//  down:    5xx, timeouts, unreachable: left alone; dead after 30 days
+//  blocked: 401/403/429: left alone; dead after 30 days
+// Retired catalog feeds are checked again once a week, and come back if they work.
+export const DEAD_AFTER = { gone: 864e5, notfeed: 3 * 864e5, down: 30 * 864e5, blocked: 30 * 864e5 };
+const RECHECK_RETIRED_MS = 7 * 864e5;
+
+export function failKind(e) {
+  if (e.status === 404 || e.status === 410) return 'gone';
+  if ([401, 403, 429].includes(e.status)) return 'blocked';
+  if (e.status) return 'down';
+  if (e.network) return 'down';
+  return 'notfeed';
+}
+
+export function judge(feed, kind, t = now) {
+  if (feed.failKind !== kind) { feed.failKind = kind; feed.kindSince = t; feed.kindTries = 0; }
+  feed.kindTries = (feed.kindTries || 0) + 1;
+  feed.failSince ??= t;
+  let why = '';
+  if (kind === 'gone' || kind === 'notfeed') {
+    if (t - feed.kindSince >= DEAD_AFTER[kind] && feed.kindTries >= 2) why = kind === 'gone' ? 'gone' : 'no longer a feed';
+  } else if (t - feed.failSince >= DEAD_AFTER.down) why = kind === 'blocked' ? 'unreadable for a month' : 'down for a month';
+  if (why) { feed.retired ??= t; feed.retiredWhy = why; }
+  return why;
+}
+
+/** A gone or changed feed's new address: the same address over https or with/without www, the site's feed links, the usual paths. */
+async function findMoved(url, site) {
+  const tries = [];
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: 'follow',
-      headers: {
-        'user-agent': 'SalaReader/1.0 (+https://reader.sala.company)',
-        accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5',
-      },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return decodeFeed(await res.arrayBuffer(), res.headers.get('content-type') || '');
-  } finally { clearTimeout(t); }
+    const u = new URL(url);
+    if (u.protocol === 'http:') tries.push('https://' + u.host + u.pathname + u.search);
+    const flip = u.hostname.startsWith('www.') ? u.hostname.slice(4) : 'www.' + u.hostname;
+    tries.push('https://' + flip + u.pathname + u.search);
+    const pages = [site, u.origin + '/'].filter(Boolean);
+    for (const page of pages) {
+      try {
+        const html = await fetchText(page);
+        for (const m of html.matchAll(/<link\b[^>]*>/gi)) {
+          const tag = m[0];
+          if (/rel=["']?alternate/i.test(tag) && /type=["']?application\/(rss|atom)\+xml/i.test(tag)) {
+            const href = /href=["']([^"']+)["']/i.exec(tag)?.[1];
+            if (href) tries.push(absolute(decode(href), page));
+          }
+        }
+      } catch { /* no page */ }
+    }
+    for (const p of ['/feed', '/rss', '/rss.xml', '/feed.xml', '/atom.xml', '/index.xml']) tries.push(u.origin + p);
+  } catch { return ''; }
+  for (const t of [...new Set(tries.filter(Boolean))]) {
+    if (t === url) continue;
+    try { const xml = await fetchText(t); parseFeed(xml, t); return t; } catch { /* not there */ }
+  }
+  return '';
 }
 
 /** Decodes feed bytes using the charset in Content-Type or the XML declaration (UTF-8 if neither). */
@@ -277,9 +342,34 @@ async function main() {
     const id = sha(f.url, 8);
     const old = prevFeeds.get(id) || {};
     const feed = { id, url: f.url, folder: f.folder, title: f.title || old.title || f.url, site: old.site || '', ...(old.lang ? { lang: old.lang } : {}), ok: old.ok || 0, error: '' };
+    for (const k of ['failKind', 'kindSince', 'kindTries', 'failSince', 'retired', 'retiredWhy', 'lastTry', 'fetchUrl']) if (old[k] != null) feed[k] = old[k];
     const map = itemsByFeed.get(id) || new Map();
+    // A retired feed is only checked again once a week.
+    if (feed.retired && now - (feed.lastTry || 0) < RECHECK_RETIRED_MS) {
+      feed.error = old.error || '';
+      console.log(`RETIRED ${feed.title} (${feed.retiredWhy}), next check in ${Math.ceil((feed.lastTry + RECHECK_RETIRED_MS - now) / 864e5)} days`);
+      const kept = [...map.values()].filter((it) => it.d > now - KEEP_DAYS * 864e5).sort((a, b) => b.d - a.d).slice(0, KEEP_PER_FEED);
+      feed.count = kept.length;
+      return { feed, items: kept };
+    }
+    feed.lastTry = now;
     try {
-      const parsed = parseFeed(await fetchText(f.url), f.url);
+      let xml, parsed, addr = feed.fetchUrl || f.url;
+      try {
+        xml = await fetchText(addr);
+        parsed = parseFeed(xml, addr);
+      } catch (e) {
+        // Gone, or no longer a feed: look for where it went before judging it.
+        const kind = failKind(e);
+        if (kind !== 'gone' && kind !== 'notfeed') throw e;
+        const moved = await findMoved(f.url, feed.site);
+        if (!moved) throw e;
+        addr = moved;
+        parsed = parseFeed(await fetchText(moved), moved);
+        feed.fetchUrl = moved;
+        console.log(`MOVED ${feed.title}: now ${moved} (update feeds.json)`);
+      }
+      for (const k of ['failKind', 'kindSince', 'kindTries', 'failSince', 'retired', 'retiredWhy']) delete feed[k];
       if (!f.title && parsed.title) feed.title = parsed.title;
       if (parsed.site) feed.site = parsed.site;
       if (parsed.lang) feed.lang = parsed.lang;
@@ -308,8 +398,10 @@ async function main() {
       });
       console.log(`ok   ${feed.title} (${parsed.items.length})`);
     } catch (e) {
-      feed.error = String(e.message || e).slice(0, 200);
-      console.log(`FAIL ${feed.title}: ${feed.error}`);
+      const kind = failKind(e);
+      feed.error = kind === 'notfeed' ? `Not a feed any more (${String(e.message || e).slice(0, 120)})` : String(e.message || e).slice(0, 200);
+      const why = judge(feed, kind);
+      console.log(`${why ? 'DEAD' : 'FAIL'} ${feed.title}: ${kind}, ${feed.error}${why ? ` -> retired (${why})` : ''}`);
     }
     // One copy per article (earlier runs may have stored one twice).
     const keyed = new Set();
@@ -369,6 +461,15 @@ async function main() {
   }));
   const failed = feeds.filter((x) => x.feed.error).length;
   console.log(`\n${items.length} items from ${feeds.length - failed}/${feeds.length} feeds`);
+  // A report for the catalog's keeper: what's dead (to remove from feeds.json), moved, or having trouble.
+  const fs = feeds.map((x) => x.feed);
+  const rows = (list, fmt) => list.map((f) => `| ${f.title.replace(/\|/g, '/')} | ${f.url} | ${fmt(f)} |`).join('\n');
+  const dead = fs.filter((f) => f.retired), moved = fs.filter((f) => f.fetchUrl && !f.retired), trouble = fs.filter((f) => f.error && !f.retired);
+  const report = `## Catalog feed health\n\n${fs.length} feeds: ${fs.length - failed} working, ${trouble.length} having trouble (left alone), ${dead.length} retired as dead, ${moved.length} moved.\n`
+    + (dead.length ? `\n### Retired as dead: remove from feeds.json\n\n| Feed | Address | Why |\n|---|---|---|\n${rows(dead, (f) => `${f.retiredWhy}: ${f.error}`)}\n` : '')
+    + (moved.length ? `\n### Moved: update the address in feeds.json\n\n| Feed | Old address | Now |\n|---|---|---|\n${rows(moved, (f) => f.fetchUrl)}\n` : '')
+    + (trouble.length ? `\n### Having trouble (left alone)\n\n| Feed | Address | Problem |\n|---|---|---|\n${rows(trouble, (f) => `${f.failKind} since ${new Date(f.failSince).toISOString().slice(0, 10)}: ${f.error}`)}\n` : '');
+  if (process.env.GITHUB_STEP_SUMMARY) await writeFile(process.env.GITHUB_STEP_SUMMARY, report, { flag: 'a' });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

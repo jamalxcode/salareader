@@ -1,0 +1,3 @@
+<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://a.com/blog/"><title>Edge Atom</title><link href="https://a.com/"/>
+<entry><title>P1</title><link href="post1"/><id>1</id><updated>2026-10-30T00:00:00Z</updated><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Hello <b>world</b></p></div></content></entry>
+<entry><title>P2</title><link href="post2"/><id>1</id><updated>2026-10-29T00:00:00Z</updated><summary>Dup id</summary></entry></feed>

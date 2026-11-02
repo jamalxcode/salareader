@@ -1,0 +1,31 @@
+const { chromium } = require('playwright');
+const fs = require('fs');
+const T = process.argv[2];
+(async () => {
+  const b = await chromium.launch(); const errs = [];
+  const mk = async () => {
+    const ctx = await b.newContext({ acceptDownloads: true });
+    await ctx.route('**/*', (r) => { const u = r.request().url(); if (u.includes('dompurify')) return r.fulfill({ path: T + '/pw/node_modules/dompurify/dist/purify.min.js', contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' } }); return u.startsWith('http://localhost') ? r.continue() : r.abort(); });
+    const p = await ctx.newPage(); p.on('pageerror', (e) => errs.push(e.message)); p.on('dialog', (d) => d.accept()); return p;
+  };
+  const keys = (p) => p.evaluate(() => new Promise((res) => { const r = indexedDB.open('salareader'); r.onsuccess = () => { const q = r.result.transaction('kv').objectStore('kv').getAllKeys(); q.onsuccess = () => res(q.result); }; }));
+  const p = await mk();
+  await p.goto('http://localhost:8770/'); await p.waitForSelector('.hero');
+  await p.click('#addBtn'); await p.fill('#addUrl', 'http://localhost:8766/cors/xkcd.xml'); await p.click('#addSubmit'); await p.waitForSelector('article.entry');
+  await p.click('article.entry .row'); await p.waitForSelector('.body'); await p.click('.body [data-act=star]'); await p.waitForTimeout(800);
+  console.log('device 1 keys:', (await keys(p)).join(','));
+  await p.click('#settingsBtn');
+  const [dl] = await Promise.all([p.waitForEvent('download'), p.click('#exportBackup')]);
+  await dl.saveAs(T + '/backup2.json');
+  const bk = JSON.parse(fs.readFileSync(T + '/backup2.json', 'utf8'));
+  console.log('backup: subs', bk.data.subs.length, '| ownItems feeds', Object.keys(bk.data.ownItems).length, '| starred', Object.keys(bk.data.starred).length);
+  fs.writeFileSync(T + '/bad.json', JSON.stringify({ app: 'salareader', data: { subs: 'oops' } }));
+  const q = await mk();
+  await q.goto('http://localhost:8770/'); await q.waitForSelector('.hero');
+  await q.click('#settingsBtn'); await q.setInputFiles('#backupFile', T + '/bad.json'); await q.waitForTimeout(500);
+  console.log('damaged backup ->', await q.$eval('#toast', (e) => e.textContent));
+  await q.setInputFiles('#backupFile', T + '/backup2.json'); await q.waitForTimeout(1500); await q.waitForSelector('.hero');
+  console.log('device 2 keys:', (await keys(q)).join(','), '| own feed in sidebar:', await q.$$eval('#sidebar a.feed', (l) => l.some((a) => a.getAttribute('href').includes('/feed/L'))), '| starred:', await q.$eval('a[href="#/starred"] .count', (e) => e.textContent));
+  console.log('errors', errs);
+  await b.close();
+})();

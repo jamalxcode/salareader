@@ -1,0 +1,309 @@
+{
+  "t2.cjs": {
+    "name": "AI assistants: switching, keys, models, OpenRouter sign-in",
+    "expect": [
+      "needKey opened settings: true",
+      "openrouter signin visible: true",
+      "Signed in to OpenRouter",
+      "saved: \\[ 'openrouter', \\{ openrouter: 'sk-or-test' \\} \\]"
+    ]
+  },
+  "t3.cjs": {
+    "name": "First run, subscribe and unsubscribe, own feeds, relay, backup, import, erase",
+    "expect": [
+      "7\\. via relay -> /feed/",
+      "keys in file: \\{\\} token: \\\"\\\"",
+      "9\\. new device after import: subs 8 starred 1 read 3",
+      "10\\. after erase: subs 6"
+    ]
+  },
+  "t4.cjs": {
+    "name": "Relay settings: shared, own, off; web pages lead to their feed",
+    "expect": [
+      "new user mode: shared",
+      "add a web page -> /feed/\\S+ \\| .* \\| 25 entries",
+      "404: Nothing was found",
+      "relay off: This site doesn't let web pages read its feed"
+    ]
+  },
+  "t5.cjs": {
+    "name": "A 71-feed OPML import, paced to the relay",
+    "expect": [
+      "429s 0",
+      "entity feed: \\[ 'Entity feed' \\]",
+      "reload re-fetched 1 feeds"
+    ]
+  },
+  "t6.cjs": {
+    "name": "Broken feeds are marked; character entities decode",
+    "expect": [
+      "red !: \\[ \\\"BBroken feed! => Couldn't fetch: HTTP 404\\\" \\]",
+      "entity item: Café prices & more… – Tom & Jerry © 2026 and AT&T"
+    ]
+  },
+  "t7.cjs": {
+    "name": "Two tabs, Latin-1 feeds, hostile feeds, erase everything",
+    "expect": [
+      "Latin count: 2 \\| has javascript feed: false",
+      "latin item: Crème brûlée – Déjà vu",
+      "evil hrefs: \\[ '#', '#' \\]",
+      "alerts fired: \\[\\]",
+      "B starred count after A starred: 1",
+      "own feeds in sidebar: 0"
+    ]
+  },
+  "t8.cjs": {
+    "name": "Backup to a new device; a damaged backup is refused",
+    "expect": [
+      "damaged backup -> That file isn't a Sala Reader backup",
+      "own feed in sidebar: true"
+    ]
+  },
+  "t9.cjs": {
+    "name": "Keyboard on links and buttons; a missing catalog",
+    "expect": [
+      "Enter on link -> #/starred",
+      "Enter on ⚙ button opens settings: true",
+      "stray own: record cleaned up: true"
+    ]
+  },
+  "t10.cjs": {
+    "name": "Every theme passes accessibility; titles open and close articles",
+    "expect": [
+      "light list clean",
+      "dark list clean",
+      "classic list clean",
+      "paper list clean",
+      "home clean",
+      "click title again closes: true"
+    ]
+  },
+  "t11.cjs": {
+    "name": "Feed edge cases (xml:base, duplicate ids, xhtml), dialogs, failed refresh",
+    "expect": [
+      "items \\[ 'P1', 'P2' \\]",
+      "P1 link: https://a\\.com/blog/post1 \\| xhtml body: Hello world",
+      "blank topic -> Type what the topic is about",
+      "opened article still listed after same-view route: true"
+    ]
+  },
+  "t12.cjs": {
+    "name": "News searches, Google News via Bing, a dead feed, Space to scroll",
+    "expect": [
+      "news search: .*tbilisi story one",
+      "link unwrapped: https://example\\.org/one",
+      "google news: 2 unread .* from Bing News\\. \\| 2 items",
+      "dead feed: ⚠ Gone",
+      "still open true \\| scrolled true"
+    ]
+  },
+  "t14.cjs": {
+    "name": "Old Google News search addresses work through Bing",
+    "expect": [
+      "articles: \\[ 'Bing \\\"tbilisi\\\" 0'",
+      "asked: news\\.google\\.com .* → www\\.bing\\.com"
+    ]
+  },
+  "t16.cjs": {
+    "name": "The same article under new ids shows once and stays read",
+    "expect": [
+      "after 3 fetches with new guids each time: 5 articles \\| still read: \\[ 'Story 5' \\]",
+      "stored duplicates cleaned on load: 5 articles",
+      "same-link feed keeps: \\[ 'Episode 3', 'Episode 2', 'Episode 1' \\]"
+    ]
+  },
+  "t17.cjs": {
+    "name": "Importing in two tabs never duplicates",
+    "expect": [
+      "after import  A: \\{ subs: 8, dupSubs: 0, items: 151, dupItems: 0 \\}",
+      "import again  A: \\{ subs: 8, dupSubs: 0, items: 151, dupItems: 0 \\}"
+    ]
+  },
+  "t18.cjs": {
+    "name": "Adding a feed twice at once adds it once",
+    "expect": [
+      "double add: \\{ subs: 7, dupSubs: 0, dupItems: 0 \\}",
+      "repeated titles: 0"
+    ]
+  },
+  "t20.cjs": {
+    "name": "YouTube channels from a Feedly OPML",
+    "expect": [
+      "Some channel shown in folders",
+      "raw playlist pages asked: 0",
+      "video article: <img class=\\\"lead\\\""
+    ]
+  },
+  "t21.cjs": {
+    "name": "Moved feeds are found",
+    "expect": [
+      "OK   http://english\\.aljazeera\\.net/.* → https://www\\.aljazeera\\.com/xml/rss/all\\.xml",
+      "OK   https://moved\\.test/old\\.xml → https://moved\\.test/feed",
+      "This feed moved; it's now read from aljazeera\\.com"
+    ]
+  },
+  "t22.cjs": {
+    "name": "OR news searches; gone feeds retired after a day; Keep trying; Delete all",
+    "expect": [
+      "Bing asked for: \\[ 'bitcoin', 'blockchain', 'cryptocurrency' \\]",
+      "gone, first day: \\{ kind: 'gone', retired: false \\}",
+      "'📦 Retired feeds'",
+      "kept feed fails again → still kept \\(not retired\\): \\{ retired: false, keep: true \\}",
+      "after Delete all: subscriptions with bitcoinnews: 0"
+    ]
+  },
+  "t23.cjs": {
+    "name": "Full article through the relay; the multilingual model",
+    "expect": [
+      "full article: <h2>Whole story</h2><p>Para one &lt;script&gt;",
+      "saved setting: multi",
+      "vector files fetched: \\[ '/data/vectors-multi\\.json' \\]"
+    ]
+  },
+  "t24.cjs": {
+    "name": "AI search over 4,800 own articles keeps the page responsive",
+    "expect": [
+      "final status: \\d+ results, best matches first \\| article still open: true",
+      "longest main-thread stall: ([0-9]|[0-9][0-9]|[1-2][0-9][0-9]) ms"
+    ]
+  },
+  "t25.cjs": {
+    "name": "Smart folders: languages, topics, kinds; unread only",
+    "expect": [
+      "🌐 Languages: 🌐English\\d+, 🌐French2, 🌐Arabic2",
+      "Arabic view: 🌐 Arabic",
+      "after reading one: list 2 \\(opened stays\\)"
+    ]
+  },
+  "t28.cjs": {
+    "name": "Investigations with Grok: X, web and YouTube, follow, reopen",
+    "expect": [
+      "tools \\[\\{\\\"type\\\":\\\"x_search\\\"\\},\\{\\\"type\\\":\\\"web_search\\\"\\}\\]",
+      "playing: https://www\\.youtube-nocookie\\.com/embed/dQw4w9WgXcQ",
+      "follow chips: \\[ '✨ AI topic ON', '📰 News feed ON', '𝕏 Watch X ON' \\]",
+      "X watch ran on reopen: true",
+      "after reload: messages 8 \\(want 8\\) \\| stored keys clean: true"
+    ]
+  },
+  "t29.cjs": {
+    "name": "Colour contrast in light and dark",
+    "expect": [
+      "light contrast violations: \\[\\]",
+      "dark contrast violations: \\[\\]"
+    ]
+  },
+  "t30.cjs": {
+    "name": "An opened article stays open in a smart folder while feeds update",
+    "expect": [
+      "opened article still open after a background update: true",
+      "after j: first still listed true"
+    ]
+  },
+  "t31.cjs": {
+    "name": "The same story in several feeds shows once and is read together",
+    "expect": [
+      "French smart folder: 4 articles \\(want 4\\)",
+      "read one copy: \\{ copies: 3, allRead: true \\}",
+      "lists its own copies: 3 \\(want 3\\)"
+    ]
+  },
+  "t32.cjs": {
+    "name": "Articles take centre stage at 1000 and 1440 px",
+    "expect": [
+      "1000 px window: .* main share 7\\d% \\| overflow 0",
+      "menu closes after picking: true",
+      "1440 px window: .* overflow 0"
+    ]
+  },
+  "t33.cjs": {
+    "name": "Resizing the investigation panel",
+    "expect": [
+      "dragged 150 left \\{ main: 679, panel: 524",
+      "after reload \\(kept\\) \\{ main: 455, panel: 748",
+      "dblclick reset \\{ main: 829, panel: 374",
+      "phone handle visible: false"
+    ]
+  },
+  "t34.cjs": {
+    "name": "Resizing the sidebar",
+    "expect": [
+      "nav -200 \\(min 180\\) \\{ nav: 180",
+      "nav far right \\(cap 440\\) \\{ nav: 440",
+      "after reload \\{ nav: 440",
+      "nav dblclick reset \\{ nav: 232",
+      "nav hidden, handle visible: false"
+    ]
+  },
+  "t35.cjs": {
+    "name": "Desktop: reading pane, right-click menus, Ctrl+K, text controls",
+    "expect": [
+      "pane class: true \\| empty reader: true",
+      "900px pane: false \\| pane button shown: false",
+      "mark above read: unread 25 → 22",
+      "went to: #/feed/",
+      "theme now: dark",
+      "after reload: 19px system-ui",
+      "manifest: Sala Reader \\| sw: true"
+    ]
+  },
+  "t36.cjs": {
+    "name": "Reading pane: the list scrolls, Space pages on to the next article",
+    "expect": [
+      "mainScroll: 0",
+      "curVisible: true",
+      "space at end → next article: true"
+    ]
+  },
+  "t37.cjs": {
+    "name": "Accessibility of the pane, menus, palette and text panel",
+    "expect": [
+      "light pane view ok",
+      "light context menu ok",
+      "light text panel ok",
+      "light palette ok",
+      "dark pane view ok",
+      "dark context menu ok",
+      "dark text panel ok",
+      "dark palette ok"
+    ]
+  },
+  "t38.cjs": {
+    "name": "Automatic folder backup, encryption, restore, crash guard",
+    "expect": [
+      "after choose: ✓ On: backing up every day",
+      "file count: 8",
+      "keys inside\\? plaintext visible: false",
+      "wrong pass toast: Wrong passphrase",
+      "restored starred: 1 → 1",
+      "after a simulated crash: This window couldn't open the folder"
+    ]
+  },
+  "t39.cjs": {
+    "name": "Dead or alive: gone, not a feed, down, blocked, quiet, relay trouble",
+    "expect": [
+      "'UA picky feed: ok'",
+      "'Page feed: notfeed'",
+      "'Gone feed: RETIRED \\(gone\\)'",
+      "'Down feed: down'",
+      "'Blocked feed: RETIRED \\(unreadable for a month\\)'",
+      "'Page feed: RETIRED \\(no longer a feed\\)'",
+      "down feed failSince unchanged: true"
+    ]
+  },
+  "t40.cjs": {
+    "name": "1,700 feeds and 51,000 articles stay responsive",
+    "expect": [
+      "feeds 1700, items 51\\d\\d\\d",
+      "refresh: done in \\d+ ms \\| event-loop lag max ([0-9]|[0-9][0-9]|[1-4][0-9][0-9]) ms",
+      "j responded in ([0-9]|[0-9][0-9]|[1-4][0-9][0-9]) ms"
+    ]
+  },
+  "t41.cjs": {
+    "name": "Background refresh: prefetched feeds need no network",
+    "expect": [
+      "worker in control: true",
+      "prefetched in the background: 3",
+      "network requests in the next refresh \\(should be the not-prefetched ones only\\): \\[\\]"
+    ]
+  }
+}

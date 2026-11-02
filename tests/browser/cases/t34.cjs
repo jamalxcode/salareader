@@ -1,0 +1,28 @@
+const { chromium } = require('playwright');
+const T = process.argv[2];
+(async () => {
+  const b = await chromium.launch(); const errs = [];
+  const ctx = await b.newContext({ viewport: { width: 1440, height: 900 } });
+  await ctx.route('**/*', (r) => { const u = r.request().url(); if (u.includes('dompurify')) return r.fulfill({ path: T + '/pw/node_modules/dompurify/dist/purify.min.js', contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' } }); if (u.includes('transformers')) return r.fulfill({ path: T + '/pw/fake-tf.js', contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' } }); return u.startsWith('http://localhost') ? r.continue() : r.abort(); });
+  const p = await ctx.newPage(); p.on('pageerror', (e) => errs.push(e.message));
+  await p.goto('http://localhost:8770/?debug#/smart/topic%3Aai'); await p.waitForSelector('article.entry');
+  const m = () => p.evaluate(() => { const r = (s) => { const e = document.querySelector(s); return e && e.offsetParent ? Math.round(e.getBoundingClientRect().width) : 0; }; return { nav: r('#sidebar'), main: r('main'), panel: r('#invPanel'), logo: r('.logo'), overflow: document.documentElement.scrollWidth - innerWidth }; });
+  const drag = async (sel, dx) => { const bx = await p.locator(sel).boundingBox(); const x = bx.x + bx.width / 2, y = bx.y + 400; await p.mouse.move(x, y); await p.mouse.down(); await p.mouse.move(x + dx, y, { steps: 8 }); await p.mouse.up(); await p.mouse.move(700, 500); await p.waitForTimeout(100); };
+  console.log('start', await m());
+  await drag('#navResizer', 100); console.log('nav +100', await m());
+  await drag('#navResizer', -200); console.log('nav -200 (min 180)', await m());
+  await drag('#navResizer', 600); console.log('nav far right (cap 440)', await m());
+  await p.click('article.entry .line'); await p.waitForSelector('.body .actions');
+  await p.click('.body [data-act="digdeeper"]'); await p.waitForSelector('.inv-head'); await p.waitForTimeout(300);
+  console.log('inv open', await m());
+  await drag('#invResizer', -800); console.log('inv max with wide nav', await m());
+  await p.screenshot({ path: `${T}/shot-resize2.png` });
+  await p.reload(); await p.waitForSelector('article.entry'); await p.waitForTimeout(300);
+  console.log('after reload', await m());
+  await p.dblclick('#navResizer'); console.log('nav dblclick reset', await m());
+  await p.focus('#navResizer'); await p.keyboard.press('ArrowRight'); console.log('nav ArrowRight +24', await m());
+  await p.keyboard.press('u'); await p.waitForTimeout(100); console.log('nav hidden, handle visible:', await p.isVisible('#navResizer'));
+  await p.setViewportSize({ width: 390, height: 800 }); await p.waitForTimeout(200);
+  console.log('phone handles visible:', await p.isVisible('#navResizer'), await p.isVisible('#invResizer'), await m());
+  console.log('errors', errs); await b.close();
+})();

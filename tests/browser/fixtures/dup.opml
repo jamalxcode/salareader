@@ -1,0 +1,4 @@
+<?xml version="1.0"?><opml version="2.0"><body>
+<outline text="A"><outline type="rss" text="Latin" xmlUrl="http://feeds.test/plain/latin.xml"/><outline type="rss" text="Evil" xmlUrl="http://feeds.test/plain/evil.xml"/></outline>
+<outline text="B"><outline type="rss" text="Latin again" xmlUrl="http://feeds.test/plain/latin.xml"/><outline type="rss" text="Bad" xmlUrl="javascript:alert(1)"/></outline>
+</body></opml>

@@ -26,7 +26,7 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
 - **News searches:** type words instead of an address in ＋ Subscribe (for example `tbilisi`) to follow a news search for them (Bing News RSS). Google Reader-era Google News search feeds in an OPML import keep working: Google blocks relays, so the same search comes from Bing News (also when Google answers with nothing), and the feed page shows its address and says where results come from. All Google News search formats are recognised: `?q=…` (Google Reader-era and current) and `/search/section/q/…`. Search words are passed as they are: quotes ("exact phrase") and -minus work as usual. Bing's RSS returns nothing for OR, so a search with OR runs one search per term and merges the results (each article once).
 - **Moved feeds are found automatically:** when a feed is gone (404) or its address now shows a web page, the reader follows the page to the feed it advertises, checks a short list of known moves (sites that changed domain), and tries the usual feed paths on the site (`/rss`, `/feed`, `/rss.xml`, …, at most weekly per feed). The subscription keeps its read and starred marks; its page says where it's now read from.
-- **Dead or alive: every failing feed gets a decision.** Each failure is sorted, and only dead feeds are retired:
+- **Dead or alive: every failing feed gets a decision** (yours in your browser, the shared catalog's on GitHub with the same rules). Each failure is sorted, and only dead feeds are retired:
   - **Gone** (404/410, a closed YouTube channel) with no new address found: retired once it has stayed gone for a day.
   - **No longer a feed** (the address now shows a web page, and no feed was found on the site): retired after 3 days.
   - **Site down** (5xx, timeouts) or **blocked by the site** (401/403/429): left alone and tried again (hourly, then every 6 hours, then daily); retired only after a month without ever working.
@@ -52,7 +52,7 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 - **Share without sharing your data:** ⇪ Share folder saves a folder's feeds as an OPML file you send to whoever you like. Nothing goes through Sala Reader; the file holds feed addresses only, never what you read or starred.
 - **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML. A feed can be in several folders, as in Google Reader and Feedly: it shows in each, and its articles count once. Re-importing a file adds missing folders to feeds you already have.
 - **YouTube channels:** Feedly-style addresses (`youtube.com/playlist?list=UU…`, `/channel/UC…`, `/user/…`) are read through YouTube's RSS feed, with thumbnails and descriptions.
-- **Many feeds:** each of your own feeds is fetched as often as it posts (every 30 minutes for busy feeds, up to twice a day for quiet ones, daily for silent ones). Failing feeds back off: hourly, every 6 hours, then daily. This keeps even a 1,000-feed reader within the shared relay's allowance.
+- **Many feeds:** the feeds you read most are fetched first; sites that can be read directly are fetched in parallel, and only the relay's requests are paced. With 1,700 feeds the page stays responsive while they arrive (redraws are spaced out when they get costly, and the subscription list is saved once per batch rather than after every feed). Installed as an app in Chrome or Edge, it also refreshes your most-read feeds in the background now and then, so they're ready the moment you open it. Each of your own feeds is fetched as often as it posts (every 30 minutes for busy feeds, up to twice a day for quiet ones, daily for silent ones). Failing feeds back off: hourly, every 6 hours, then daily. This keeps even a 1,000-feed reader within the shared relay's allowance.
 - **Move devices:** ⚙ Settings → *Export backup* saves everything to one file. *Import backup* on the other device restores it. API keys are left out unless you tick the box.
 
 ## Rules
@@ -95,7 +95,8 @@ Everything you do in Sala Reader is stored **only on your device**, in the brows
 - AI topics, investigations and their conversations, and smart-folder results;
 - your settings, the relay you chose, and any AI API keys you entered;
 - the AI search model and article search data, cached so they aren't downloaded again;
-- a copy of the site's own files (not your data), so the installed app opens offline.
+- a copy of the site's own files (not your data), so the installed app opens offline;
+- for the installed app's background refresh: the list of your most-read feed addresses (and your relay's address and token, if you use your own), and the feeds it fetched, in this browser's cache storage until the page reads them in.
 
 Your phone and your laptop each have their own reader, and clearing the browser's site data erases it. Sala Reader has no copy and cannot recover it. A few display preferences (such as the width of the sidebar) are kept in the browser's local storage on that device.
 
@@ -116,7 +117,7 @@ Only the requests needed to show you feeds and answer what you ask. None of them
 | What | Goes to | When |
 |---|---|---|
 | The shared catalog (`data/`) | this site (GitHub Pages) | on load. Everyone gets the same files, including all catalog articles, so the site can't tell what you follow or read |
-| Your own feeds | the feed's site, or the relay you chose: [shared](#the-relay) by default, your own, or none | when they're refreshed. The relay sees only the feed's address |
+| Your own feeds (also in the background, if the app is installed) | the feed's site, or the relay you chose: [shared](#the-relay) by default, your own, or none | when they're refreshed. The relay sees only the feed's address |
 | 📄 Full article | the relay, which fetches the article page | only when you press 📄 Full article. The relay sees the article's address |
 | Images inside articles | their own sites, with no referrer | when you open an article |
 | The AI search model | jsDelivr and Hugging Face | once (the multilingual model once more if you pick it). Searches run on the device |
@@ -167,7 +168,7 @@ cron-job.org ──(every 30 min)──▶ GitHub API: run update.yml
 
 - **`feeds.json`** is the shared **catalog**: feeds the server fetches for everyone. A new reader starts subscribed to all of them and can unsubscribe from any. The rest are listed under ＋ Subscribe. Edit the file on GitHub to change the catalog; the push triggers an update straight away. Your own subscriptions are never written here.
 - **`.github/workflows/update.yml`** fetches the feeds, saves the data and deploys the site. It runs on every push to `main`, and whenever cron-job.org calls it.
-- **`scripts/fetch.mjs`** parses RSS, RSS 1.0 (RDF) and Atom. It keeps 60 days of items, at most 150 per feed, and computes an AI vector for each new item. It writes:
+- **`scripts/fetch.mjs`** applies the same dead-or-alive rules to the catalog's feeds: it looks for moved feeds, retires dead ones (checked again weekly), and writes a **Catalog feed health** report on each run's summary page in Actions, listing feeds to remove or update in `feeds.json`. It parses RSS, RSS 1.0 (RDF) and Atom. It keeps 60 days of items, at most 150 per feed, and computes an AI vector for each new item. It writes:
   - `data/index.json`: the feeds and the article list;
   - `data/content.json`: full article text for every feed in one file, loaded when you open an article;
   - `data/vectors.json` and `data/vectors-multi.json`: the AI vectors for the English and multilingual models, loaded when you search;
@@ -281,6 +282,24 @@ npm ci
 node scripts/fetch.mjs          # writes data/ (add SKIP_EMBED=1 to skip AI vectors)
 python3 -m http.server 8000     # then open http://localhost:8000
 ```
+
+## Tests
+
+Every push runs **Tests** (`.github/workflows/tests.yml`):
+
+- **Unit tests** (`tests/unit`): the shared catalog's dead-or-alive rules.
+- **Browser tests** (`tests/browser`): about 35 end-to-end cases in headless Chromium, covering importing and reading, backups (plain and encrypted), multi-tab safety, relay modes, moved and dead feeds, news searches, AI search staying responsive, smart folders, investigations, colour contrast and accessibility, the reading pane, right-click menus, the command palette, text controls, the installable app, background refresh, and 1,700 feeds staying responsive. Everything runs on the test machine: the site with test data, stand-in feed sites (working, gone, down, blocking, not a feed, quiet), and the relay running `relay/worker.js`. Nothing is fetched from the internet.
+
+Run them yourself:
+
+```bash
+cd tests/browser
+npm ci
+npx playwright install chromium
+node run.mjs            # all of them, or e.g. node run.mjs t16 t39
+```
+
+`tests/browser/tests.json` names each case and the lines its output must contain.
 
 ## Checks
 
