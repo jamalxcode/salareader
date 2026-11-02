@@ -75,7 +75,7 @@ jobs:
       - name: Assemble the site
         run: |
           mkdir _site
-          cp -r index.html style.css app.js ai.js embed-worker.js smart.js icon.svg feeds.json directory.json CNAME .nojekyll data _site/
+          cp -r index.html style.css app.js ai.js embed-worker.js smart.js sw.js manifest.webmanifest icon.svg icon-192.png icon-512.png icon-maskable.png feeds.json directory.json CNAME .nojekyll data _site/
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

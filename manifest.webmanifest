@@ -1,0 +1,22 @@
+{
+  "name": "Sala Reader",
+  "short_name": "Sala Reader",
+  "description": "A private, Google Reader-style RSS reader with AI search. Your data stays on your device.",
+  "id": "/",
+  "start_url": "/#/home",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1a73e8",
+  "categories": ["news", "productivity"],
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "All items", "url": "/#/all" },
+    { "name": "Starred", "url": "/#/starred" }
+  ]
+}

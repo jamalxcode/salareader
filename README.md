@@ -16,6 +16,13 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
   - The model is picked automatically: the newest general model your key can use, DeepSeek's `deepseek-v4-flash`, or OpenRouter's Auto Router. Claude defaults to Opus 5.5. Use **Show available models** to choose another.
   - Keys stay in your browser and are sent only to that assistant's API. Usage is billed to that API account; a ChatGPT Plus subscription doesn't cover it.
   - Gemini, ChatGPT and OpenRouter accept requests from web pages. If DeepSeek or Grok refuse them, the error says so: use their models through OpenRouter instead.
+- **🖥️ Made for the desktop:**
+  - **◫ Reading pane** (`3`): the article list on the left and the open article on the right, as in Outlook or Reeder. `j`/`k` move through the list, `Space` pages through the article and then on to the next one, and the line between them can be dragged. Windows narrower than 1,000 points use the list view instead.
+  - **Install it as an app** (⤓ in the top bar, in Chrome and Edge; in Safari on a Mac, *File → Add to Dock*): its own window, a Dock or taskbar icon showing your unread count, and it opens offline. It also asks the browser to keep your data permanently.
+  - **Automatic backup to a folder** (⚙ Settings, Chrome and Edge): a backup every day into a folder you pick, the last 7 days kept. Pick a folder in iCloud Drive, Dropbox, OneDrive or Google Drive and your other computers get it too. Optionally encrypted with a passphrase (AES-256), which then includes your API keys.
+  - **Right-click menus** on articles (star, mark read, mark everything above or below as read, open or copy the link, dig deeper), feeds (refresh, edit, copy the address, share, unsubscribe), folders, topics, smart folders and investigations. Text and links inside an article keep the browser's own menu.
+  - **Command palette** (`Ctrl`+`K` or `⌘`+`K`): type to go to any feed, folder, topic or investigation, or run any command (layout, sort, theme, text size, AI assistant, backup…). Typing anything else offers to search for it by meaning, investigate it, or follow it as a news search.
+  - **Text size and font** (**Aa** in the top bar, or `+` and `−`): size, serif or sans-serif, line width and line spacing for articles, kept with your settings.
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
 - **News searches:** type words instead of an address in ＋ Subscribe (for example `tbilisi`) to follow a news search for them (Bing News RSS). Google Reader-era Google News search feeds in an OPML import keep working: Google blocks relays, so the same search comes from Bing News (also when Google answers with nothing), and the feed page shows its address and says where results come from. All Google News search formats are recognised: `?q=…` (Google Reader-era and current) and `/search/section/q/…`. Search words are passed as they are: quotes ("exact phrase") and -minus work as usual. Bing's RSS returns nothing for OR, so a search with OR runs one search per term and merges the results (each article once).
 - **Moved feeds are found automatically:** when a feed is gone (404) or its address now shows a web page, the reader follows the page to the feed it advertises, checks a short list of known moves (sites that changed domain), and tries the usual feed paths on the site (`/rss`, `/feed`, `/rss.xml`, …, at most weekly per feed). The subscription keeps its read and starred marks; its page says where it's now read from.
@@ -33,7 +40,7 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
   - Empty ones are hidden. It all happens on your device.
 - **📄 Full article:** for feeds that send only a summary, the button gets the article's text and pictures through the relay (no ads, scripts or trackers), and **Feed version** switches back.
 - **Organise:** ✎ Edit on a feed renames it, changes its folders (it can be in several) or shows its address. Drag a feed onto a folder to move it. Folders have ✎ Rename, ⇪ Share folder and Delete folder (keep its feeds, or unsubscribe them too).
-- **Reading your way:** newest or oldest first, unread or all, list or expanded, remembered per feed, folder and topic. ✓ Mark read ▾ marks all, or only articles older than a day or a week. On phones, swipe an article right to star it, left to mark it read, and pull down to refresh.
+- **Reading your way:** newest or oldest first and unread or all, remembered per feed, folder and topic; the layout (list, expanded or reading pane) applies everywhere. ✓ Mark read ▾ marks all, or only articles older than a day or a week. On phones, swipe an article right to star it, left to mark it read, and pull down to refresh.
 - **Discover:** ＋ Subscribe lists hand-picked feeds by category, with a *For you* row matched to your folders and topics, and a filter box.
 - **Share without sharing your data:** ⇪ Share folder saves a folder's feeds as an OPML file you send to whoever you like. Nothing goes through Sala Reader; the file holds feed addresses only, never what you read or starred.
 - **Bring your feeds:** import OPML from Feedly, Inoreader or any reader, and export OPML. A feed can be in several folders, as in Google Reader and Feedly: it shows in each, and its articles count once. Re-importing a file adds missing folders to feeds you already have.
@@ -59,11 +66,12 @@ These are the rules Sala Reader is built to. Every feature has to fit them; a fe
 2. **You can always leave with everything.** *Export backup* saves it all to one file, and *Export OPML* gives your subscriptions to any other reader. Import puts it back on another device.
 3. **Sharing is your choice, and shares only feeds.** ⇪ Share folder saves an OPML file that you send yourself. It holds feed addresses, never what you read or starred, and it never passes through Sala Reader.
 4. **AI is opt-in and goes only where you send it.** The search model runs in your browser. Text goes to an AI company only when you press a button that says so (✨ Summarize, ✨ Brief me, an investigation question), only to the assistant you chose, and with your key.
-5. **Articles first.** The article column stays the widest part of the page: side columns can be resized, but the articles always keep at least 460 points, and on medium windows the sidebar tucks behind ☰ while an investigation is open.
-6. **One story, once.** A feed in several folders, or the same article in several feeds, counts and shows once in mixed views, and reading one copy reads them all.
-7. **Feeds only through the relay.** The relay returns RSS or Atom, a list of feed links, or an article's plain text blocks. It never passes web pages through, so it can't be used as a general proxy.
-8. **Accessible and readable.** Every colour pair meets WCAG AA contrast (4.5:1) in light and dark themes, everything works from the keyboard, and the live site check runs an axe-core accessibility scan.
-9. **Fail politely.** A broken feed says why and offers *Try again*; feeds gone for good retire to their own folder instead of failing silently.
+5. **Articles first.** The article column stays the widest part of the page: side columns can be resized, but the articles always keep at least 460 points (the reading pane at least 380), and on medium windows the sidebar tucks behind ☰ while an investigation is open.
+6. **Desktop-class, browser-native.** Installing, offline use, backups to a folder and badges use the browser's own features, with no app store, account or server; where a browser lacks one, the reader says so and offers the manual way.
+7. **One story, once.** A feed in several folders, or the same article in several feeds, counts and shows once in mixed views, and reading one copy reads them all.
+8. **Feeds only through the relay.** The relay returns RSS or Atom, a list of feed links, or an article's plain text blocks. It never passes web pages through, so it can't be used as a general proxy.
+9. **Accessible and readable.** Every colour pair meets WCAG AA contrast (4.5:1) in light and dark themes, everything works from the keyboard, and the live site check runs an axe-core accessibility scan.
+10. **Fail politely.** A broken feed says why and offers *Try again*; feeds gone for good retire to their own folder instead of failing silently.
 
 ## Privacy policy
 
@@ -79,14 +87,18 @@ Everything you do in Sala Reader is stored **only on your device**, in the brows
 - which articles you've read and starred (starred articles are kept even after they leave the feed);
 - AI topics, investigations and their conversations, and smart-folder results;
 - your settings, the relay you chose, and any AI API keys you entered;
-- the AI search model and article search data, cached so they aren't downloaded again.
+- the AI search model and article search data, cached so they aren't downloaded again;
+- a copy of the site's own files (not your data), so the installed app opens offline.
 
 Your phone and your laptop each have their own reader, and clearing the browser's site data erases it. Sala Reader has no copy and cannot recover it. A few display preferences (such as the width of the sidebar) are kept in the browser's local storage on that device.
+
+If you turn on **automatic backup**, the browser also writes a backup file each day into the folder you picked on your computer. It goes straight from the browser to that folder; if the folder is in a cloud drive (iCloud Drive, Dropbox, OneDrive, Google Drive), that company stores it under your account and its terms. With a passphrase the file is encrypted (AES-256-GCM, key derived with PBKDF2-SHA-256) before it's written, so the cloud drive can't read it. The passphrase is kept on your device only and can't be recovered.
 
 ### Your control
 
 - **Export backup** (⚙ Settings) saves everything to one file, which you can keep or import on another device. API keys are left out unless you tick the box.
 - **Export OPML** saves your subscriptions in the standard format any feed reader can import.
+- **Automatic backup** (⚙ Settings) can be stopped at any time; the files already in the folder are yours to keep or delete.
 - **Erase all data on this device** (⚙ Settings) deletes everything above.
 - Investigations can be exported as Markdown notes or deleted one by one.
 
@@ -162,6 +174,8 @@ cron-job.org ──(every 30 min)──▶ GitHub API: run update.yml
 index.html          the page: header, sidebar, article column, investigation panel, dialogs
 style.css           layout, themes (Light, Dark, Paper, Classic 2008), colour tokens
 app.js              the reader: storage, feeds, views, search, smart folders, investigations
+sw.js               offline worker: lets the app install and open offline (this site's own files only)
+manifest.webmanifest, icon-*.png   the installable app's name and icons
 ai.js               AI: the six assistants, Grok live search, the embedding worker pool
 embed-worker.js     runs the AI search model in a Web Worker, so the page never freezes
 smart.js            smart folders: language detection, topics and kinds
@@ -176,7 +190,7 @@ tests/site-check.mjs          end-to-end check of the live site in Chromium
 
 **Inside the browser.** `app.js` keeps everything in one IndexedDB database (`salareader`), in a key-value store plus a separate store for article bodies, and syncs open tabs through a BroadcastChannel. Feeds are parsed on the device (RSS, RDF and Atom). The AI search model (MiniLM, about 25 MB, or the multilingual one, about 120 MB) runs in up to four Web Workers; vectors for your own articles are worked out in the background, newest first, and saved per feed. Smart folders and the "same story in several feeds" check run in small chunks so scrolling stays smooth.
 
-**The screen.** A narrow, shaded sidebar on the left (Home, All items, Starred, smart folders, AI topics, investigations, subscriptions); the article column in the middle, white and widest, with a one-line header of compact coloured commands; and, when you dig into something, a grey investigation panel on the right. Both side columns can be dragged wider or narrower. On phones the sidebar slides in from ☰ and an investigation takes the whole screen.
+**The screen.** In the reading pane layout, the middle splits into the article list and the open article. Otherwise: a narrow, shaded sidebar on the left (Home, All items, Starred, smart folders, AI topics, investigations, subscriptions); the article column in the middle, white and widest, with a one-line header of compact coloured commands; and, when you dig into something, a grey investigation panel on the right. Both side columns can be dragged wider or narrower. On phones the sidebar slides in from ☰ and an investigation takes the whole screen.
 
 ### How it was built
 
@@ -191,6 +205,7 @@ Sala Reader was built in two days (1–2 November 2026) in conversation with Cla
 7. **Smart folders:** unread articles grouped by language, topic and kind, worked out on the device.
 8. **Investigations:** a side panel to question an AI about a subject, with Grok searching X, the web and YouTube live.
 9. **Look and feel:** colour-coded commands and topics, a shaded sidebar, the same story shown once across feeds, the articles given centre stage, and resizable side columns.
+10. **Desktop:** a reading pane, an installable app with an unread badge and offline use, daily (optionally encrypted) backups to a folder, right-click menus, a `Ctrl`+`K` command palette, and text size and font controls.
 
 ## The relay
 

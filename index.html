@@ -7,6 +7,8 @@
 <meta name="description" content="A Google Reader-style RSS reader with AI search that finds articles by meaning.">
 <meta name="theme-color" content="#1a73e8">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="alternate" type="application/json" href="data/index.json">
 <link rel="stylesheet" href="style.css">
 <script>
@@ -27,6 +29,8 @@
     <span id="streak" class="streak" title="Reading streak: days in a row you've read something"></span>
     <button id="surpriseBtn" class="icon-btn" title="Surprise me (x)" aria-label="Surprise me">🎲</button>
     <button id="refreshBtn" class="icon-btn" title="Refresh (r)" aria-label="Refresh">⟳</button>
+    <button id="installBtn" class="icon-btn only-wide install-btn" title="Install Sala Reader as an app" aria-label="Install Sala Reader as an app" hidden>⤓</button>
+    <button id="aaBtn" class="icon-btn only-wide" title="Text size and font (+ / −)" aria-label="Aa: text size and font" aria-expanded="false" aria-controls="aaPop">Aa</button>
     <button id="helpBtn" class="icon-btn only-wide" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
     <button id="settingsBtn" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
   </div>
@@ -39,6 +43,8 @@
   <main id="main">
     <div id="viewHeader" class="view-header"></div>
     <div id="list" class="list" tabindex="-1"></div>
+    <div id="listResizer" class="resizer list-resizer" role="separator" aria-orientation="vertical" aria-controls="list" aria-label="Resize the article list" aria-valuenow="380" aria-valuemin="260" aria-valuemax="900" title="Drag to resize · double-click to reset" tabindex="0"></div>
+    <section id="reader" class="reader" aria-label="Article" tabindex="-1"></section>
   </main>
   <div id="invResizer" class="resizer inv-resizer" role="separator" aria-orientation="vertical" aria-controls="invPanel" aria-label="Resize the investigation panel" aria-valuenow="374" aria-valuemin="280" aria-valuemax="800" title="Drag to resize · double-click to reset" tabindex="0"></div>
   <aside id="invPanel" class="inv-panel" tabindex="-1" aria-label="Investigation"></aside>
@@ -180,11 +186,28 @@
         <button type="button" id="exportBackup" class="ghost">Export backup</button>
         <label class="button ghost">Import backup<input id="backupFile" type="file" accept=".json,application/json" hidden></label>
       </div>
+      <h4 class="sub-h">Automatic backup</h4>
+      <div id="abBox">
+        <p class="hint">Save a backup to a folder on this computer every day. Pick a folder in iCloud Drive, Dropbox, OneDrive or Google Drive and your other computers get it too. It goes straight from this browser to that folder; Sala Reader never sees it. The newest is <code>salareader-backup.json</code>, and the last 7 days are kept.</p>
+        <label class="check"><input type="checkbox" id="abEncrypt"> Encrypt with a passphrase (then your API keys are included too). You'll need the passphrase to restore.</label>
+        <div class="buttons left">
+          <button type="button" id="abChoose" class="ghost">Choose folder…</button>
+          <button type="button" id="abNow" class="ghost" hidden>Back up now</button>
+          <button type="button" id="abStop" class="ghost danger" hidden>Stop</button>
+        </div>
+        <p id="abStatus" class="status" role="status"></p>
+      </div>
+      <p id="abUnsupported" class="hint" hidden>Automatic backups need Chrome, Edge, Brave or Opera on a computer. In this browser, use <b>Export backup</b> above.</p>
       <p class="hint">Subscriptions only, for other readers like Feedly or Inoreader:</p>
       <div class="buttons left">
         <label class="button ghost">Import OPML<input id="opmlFile" type="file" accept=".opml,.xml,text/xml" hidden></label>
         <button type="button" id="exportOpml" class="ghost">Export OPML</button>
       </div>
+    </section>
+    <section>
+      <h3>App and storage</h3>
+      <p class="hint" id="appInfo"></p>
+      <div class="buttons left"><button type="button" id="installApp" class="ghost" hidden>⤓ Install Sala Reader as an app</button><button type="button" id="persistBtn" class="ghost" hidden>Keep my data permanently</button></div>
     </section>
     <section>
       <h3>Privacy</h3>
@@ -225,13 +248,45 @@
       <dt><kbd>Shift</kbd>+<kbd>a</kbd></dt><dd>Mark all as read</dd>
       <dt><kbd>/</kbd></dt><dd>Search</dd>
       <dt><kbd>x</kbd></dt><dd>Surprise me</dd>
-      <dt><kbd>1</kbd> / <kbd>2</kbd></dt><dd>List / expanded view</dd>
+      <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>List / expanded / reading pane</dd>
+      <dt><kbd>Space</kbd></dt><dd>Reading pane: scroll the article, then the next one</dd>
+      <dt><kbd>+</kbd> / <kbd>−</kbd></dt><dd>Bigger / smaller text</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>⌘</kbd>+<kbd>K</kbd></dt><dd>Command palette: go anywhere, do anything</dd>
+      <dt>Right-click</dt><dd>Article, feed, folder or topic menu (or <kbd>Shift</kbd>+<kbd>F10</kbd>)</dd>
       <dt><kbd>g</kbd> <kbd>h</kbd> · <kbd>g</kbd> <kbd>a</kbd> · <kbd>g</kbd> <kbd>s</kbd></dt><dd>Go home · all items · starred</dd>
       <dt><kbd>r</kbd></dt><dd>Refresh</dd>
       <dt><kbd>u</kbd></dt><dd>Show / hide subscriptions</dd>
     </dl>
     <div class="buttons"><button value="ok" class="primary">Got it</button></div>
   </form>
+</dialog>
+
+<div id="aaPop" class="aa-pop" role="dialog" aria-label="Text size and font" hidden>
+  <div class="aa-row"><span class="aa-label">Size</span><div class="seg"><button type="button" data-aa="smaller" title="Smaller text (−)">A−</button><button type="button" data-aa="reset" id="aaSize" title="Back to normal">18</button><button type="button" data-aa="bigger" title="Bigger text (+)">A+</button></div></div>
+  <div class="aa-row"><span class="aa-label">Font</span><div class="seg" role="group" aria-label="Font"><button type="button" data-aa-font="auto">Theme</button><button type="button" data-aa-font="serif" class="serif">Serif</button><button type="button" data-aa-font="sans">Sans</button></div></div>
+  <div class="aa-row"><span class="aa-label">Line width</span><div class="seg" role="group" aria-label="Line width"><button type="button" data-aa-width="narrow">Narrow</button><button type="button" data-aa-width="medium">Medium</button><button type="button" data-aa-width="wide">Wide</button></div></div>
+  <div class="aa-row"><span class="aa-label">Spacing</span><div class="seg" role="group" aria-label="Line spacing"><button type="button" data-aa-lh="tight">Tight</button><button type="button" data-aa-lh="normal">Normal</button><button type="button" data-aa-lh="loose">Loose</button></div></div>
+</div>
+
+<div id="ctxMenu" class="ctx-menu" role="menu" hidden></div>
+
+<dialog id="passDialog" class="sheet pass-sheet">
+  <form method="dialog">
+    <h2 id="passTitle">Passphrase</h2>
+    <p class="hint" id="passHint"></p>
+    <label>Passphrase<input id="pass1" type="password" autocomplete="new-password" spellcheck="false"></label>
+    <label id="pass2Wrap">Type it again<input id="pass2" type="password" autocomplete="new-password" spellcheck="false"></label>
+    <p id="passStatus" class="status" role="status"></p>
+    <div class="buttons"><button type="button" class="ghost" data-close>Cancel</button><button value="ok" class="primary">OK</button></div>
+  </form>
+</dialog>
+
+<dialog id="cmdk" class="cmdk" aria-label="Command palette">
+  <div class="cmdk-box">
+    <input id="cmdkInput" type="text" role="combobox" aria-expanded="true" aria-controls="cmdkList" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Go to a feed, folder or topic, or type a command…">
+    <ul id="cmdkList" class="cmdk-list" role="listbox" aria-label="Results"></ul>
+    <p class="cmdk-foot"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close</p>
+  </div>
 </dialog>
 
 <div id="pullIndicator" class="pull" hidden aria-hidden="true">⟳ Pull to refresh</div>

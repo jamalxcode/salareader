@@ -201,7 +201,7 @@ const store = {
 
 // The shared relay everyone uses unless they pick their own (relay/worker.js).
 const SHARED_RELAY = 'https://salareader-relay.jamal-akuna-matata.workers.dev';
-const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', sort: 'newest', viewPrefs: {}, threshold: 0.4, aiModel: 'en', aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '' };
+const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', sort: 'newest', viewPrefs: {}, threshold: 0.4, aiModel: 'en', aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '', read: {} };
 
 const S = {
   index: { feeds: [], items: [], updated: 0 },
@@ -1579,7 +1579,7 @@ const VIEW_DEFAULTS = { mode: 'list', unreadOnly: true, sort: 'newest' };
 const viewKey = () => `${S.view.type}:${S.view.id ?? ''}`;
 function applyViewPrefs() {
   const p = S.settings.viewPrefs?.[viewKey()] || {};
-  for (const k of Object.keys(VIEW_DEFAULTS)) S.settings[k] = p[k] ?? VIEW_DEFAULTS[k];
+  for (const k of Object.keys(VIEW_DEFAULTS)) S.settings[k] = (k === 'mode' ? S.settings.defaultMode : p[k]) ?? VIEW_DEFAULTS[k];
 }
 function setViewPref(k, value) {
   S.settings[k] = value;
@@ -1742,6 +1742,7 @@ function renderSidebar() {
   }
   if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
   if (S.ownProgress) html += `<p class="nav-note progress">⟳ Fetching your feeds… ${S.ownProgress.done} of ${S.ownProgress.total}</p>`;
+  if (S.abPaused && abState()?.name) html += `<p class="nav-note warn">⏸ Automatic backup paused · <button class="linkish" data-act="resumebackup">Resume</button></p>`;
   html += `<p class="nav-note">${S.index.updated ? `Updated ${agoText(S.index.updated)}` : S.index.missing ? 'Waiting for the first feed update' : ''} · <button class="linkish" data-act="refresh">Refresh</button></p>`;
   nav.innerHTML = html;
 }
@@ -1819,7 +1820,7 @@ function renderHeader() {
     </div>
     <div class="vh-actions">
       ${filterable ? `<div class="seg" role="group" aria-label="Show"><button data-act="unread" class="${S.settings.unreadOnly ? 'on' : ''}">Unread</button><button data-act="allitems" class="${S.settings.unreadOnly ? '' : 'on'}">All</button></div>` : ''}
-      <div class="seg" role="group" aria-label="View"><button data-act="list" class="${S.settings.mode === 'list' ? 'on' : ''}" title="List view (1)">☰ List</button><button data-act="expanded" class="${S.settings.mode === 'expanded' ? 'on' : ''}" title="Expanded view (2)">▤ Expanded</button></div>
+      <div class="seg" role="group" aria-label="View"><button data-act="list" class="${S.settings.mode === 'list' ? 'on' : ''}" title="List view (1)">☰ List</button><button data-act="expanded" class="${S.settings.mode === 'expanded' ? 'on' : ''}" title="Expanded view (2)">▤ Expanded</button>${innerWidth >= PANE_MIN_WIDTH ? `<button data-act="pane" class="${S.settings.mode === 'pane' ? 'on' : ''}" title="Reading pane: the list on the left, the article on the right (3)">◫ Pane</button>` : ''}</div>
       ${v.type !== 'search' ? `<div class="seg" role="group" aria-label="Order"><button data-act="newest" class="${S.settings.sort !== 'oldest' ? 'on' : ''}" title="Newest first">↓ Newest</button><button data-act="oldest" class="${S.settings.sort === 'oldest' ? 'on' : ''}" title="Oldest first">↑ Oldest</button></div>` : ''}
       ${v.type !== 'starred' ? `<details class="menu"><summary class="button" title="Mark as read (Shift+A marks all)">✓ Mark read ▾</summary><div class="menu-list"><button data-act="markall">All</button><button data-act="markold" data-days="1">Older than a day</button><button data-act="markold" data-days="7">Older than a week</button></div></details>` : ''}
       ${v.type === 'topic' ? `<button data-act="renametopic">✎ Rename topic</button>` : ''}
@@ -1910,7 +1911,7 @@ function sanitize(html, base) {
 
 function renderList(reset = true) {
   const list = $('#list');
-  if (reset) { S.list = viewItems(); S.shown = 0; S.cur = -1; list.innerHTML = ''; }
+  if (reset) { S.list = viewItems(); S.shown = 0; S.cur = -1; list.innerHTML = ''; list.scrollTop = 0; if (paneOn()) readerEmpty(); }
   if (!S.list.length) {
     list.innerHTML = emptyHTML();
     return;
@@ -1996,7 +1997,10 @@ function renderHome() {
 }
 
 function updateTitle() {
-  document.title = S.view.type === 'home' ? `Sala Reader${S.unread ? ` (${S.unread})` : ''}` : `${viewTitle()} · Sala Reader`;
+  const n = S.unread;
+  document.title = (S.view.type === 'home' ? 'Sala Reader' : `${viewTitle()} · Sala Reader`) + (n ? ` (${n > 999 ? '999+' : n})` : '');
+  // The installed app's Dock or taskbar icon shows the unread count.
+  if (navigator.setAppBadge && n !== S.badge) { S.badge = n; (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); }
 }
 
 // ---------- organising: rename and move feeds, rename and delete folders ----------
@@ -2109,6 +2113,7 @@ function keepFeed(id) {
 }
 
 function render() {
+  document.body.classList.toggle('pane', paneOn());
   renderSidebar();
   renderHeader();
   if (S.view.type === 'home') renderHome();
@@ -2122,8 +2127,7 @@ function updateEntryDom(id) {
     a.classList.toggle('read', isRead(id));
     const star = !!S.starred[id];
     const sb = a.querySelector('.row .star');
-    sb.classList.toggle('on', star);
-    sb.textContent = star ? '★' : '☆';
+    if (sb) { sb.classList.toggle('on', star); sb.textContent = star ? '★' : '☆'; }
     const bs = a.querySelector('.actions [data-act="star"]');
     if (bs) { bs.classList.toggle('on', star); bs.textContent = star ? '★ Starred' : '☆ Star'; }
     const bu = a.querySelector('.actions [data-act="unread"]');
@@ -2145,24 +2149,32 @@ function select(idx, { open = true, scroll = true } = {}) {
   const prev = all[S.cur];
   if (prev && prev !== all[idx]) {
     prev.classList.remove('current');
-    if (S.settings.mode === 'list') closeEntry(prev);
+    if (listMode()) closeEntry(prev);
   }
   S.cur = idx;
   const a = all[idx];
   a.classList.add('current');
   if (open) openEntry(a);
-  if (scroll) {
+  if (scroll && paneOn()) {
+    // Only the list scrolls (scrollIntoView would also move the page around it).
+    const list = $('#list');
+    const top = a.offsetTop, bottom = top + a.offsetHeight; // #list is the offset parent in the pane
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+  }
+  else if (scroll) {
     // Scroll so the article sits just below the sticky top bar and view header.
     const offset = $('.top').offsetHeight + $('#viewHeader').offsetHeight + 8;
     const r = a.getBoundingClientRect();
-    if (open && S.settings.mode === 'list') window.scrollTo({ top: r.top + scrollY - offset, behavior: 'smooth' });
+    if (open && listMode()) window.scrollTo({ top: r.top + scrollY - offset, behavior: 'smooth' });
     else if (r.top < offset || r.bottom > innerHeight) window.scrollTo({ top: r.top + scrollY - offset, behavior: 'smooth' });
   }
 }
 
 function openEntry(a) {
   const id = a.dataset.id;
-  if (S.settings.mode === 'list' && !a.classList.contains('open')) {
+  if (paneOn()) showInReader(id);
+  else if (listMode() && !a.classList.contains('open')) {
     a.classList.add('open');
     a.querySelector('.line')?.setAttribute('aria-expanded', 'true');
     a.insertAdjacentHTML('beforeend', `<div class="body">${bodyHTML(S.byId.get(id) || S.starred[id])}</div>`);
@@ -2180,8 +2192,9 @@ function closeEntry(a) {
 
 function toggleEntry(a) {
   const idx = +a.dataset.idx;
-  if (S.settings.mode === 'list' && a.classList.contains('open') && S.cur === idx) { closeEntry(a); return; }
-  select(idx, { open: true, scroll: S.settings.mode === 'list' });
+  if (paneOn()) { select(idx, { open: true, scroll: false }); return; }
+  if (listMode() && a.classList.contains('open') && S.cur === idx) { closeEntry(a); return; }
+  select(idx, { open: true, scroll: listMode() });
 }
 
 const readObserver = new IntersectionObserver((list) => {
@@ -2436,9 +2449,11 @@ function closeInvestigation() {
    keys) to make the sidebar or an investigation wider or narrower. Widths
    are a preference for this device only. Double-click puts one back. */
 const MAIN_MIN = 460;
+// Device-only preferences use the srl. prefix (sr. keys are moved into the database at start).
 const PANES = {
-  inv: { handle: '#invResizer', pane: '#invPanel', cssVar: '--inv-w', key: 'salareader:invWidth', min: 280, side: 'right' },
-  nav: { handle: '#navResizer', pane: '#sidebar', cssVar: '--nav-w', key: 'salareader:navWidth', min: 180, maxCap: 440, side: 'left' },
+  inv: { handle: '#invResizer', pane: '#invPanel', cssVar: '--inv-w', key: 'srl.invWidth', min: 280, side: 'right' },
+  nav: { handle: '#navResizer', pane: '#sidebar', cssVar: '--nav-w', key: 'srl.navWidth', min: 180, maxCap: 440, side: 'left' },
+  list: { handle: '#listResizer', pane: '#list', cssVar: '--list-w', key: 'srl.listWidth', min: 260, side: 'left' },
 };
 /** Width the pane is showing as a column (0 when hidden or floating over the page). */
 function columnWidth(sel) {
@@ -2446,8 +2461,11 @@ function columnWidth(sel) {
   return el && el.offsetParent && getComputedStyle(el).position !== 'fixed' ? el.offsetWidth : 0;
 }
 function paneMax(name) {
-  const c = PANES[name], other = name === 'inv' ? '#sidebar' : '#invPanel';
-  const room = window.innerWidth - columnWidth(other) - MAIN_MIN;
+  const c = PANES[name];
+  // The article list leaves the reading pane at least 380px.
+  if (name === 'list') return Math.max(c.min, ($('main')?.clientWidth || innerWidth) - 20 - 9 - 380);
+  const other = name === 'inv' ? '#sidebar' : '#invPanel';
+  const room = window.innerWidth - columnWidth(other) - (paneOn() ? 700 : MAIN_MIN);
   return Math.max(c.min, Math.min(room, c.maxCap || window.innerWidth * 0.7));
 }
 function savedWidth(name) { try { const w = +localStorage.getItem(PANES[name].key); return w > 0 ? w : null; } catch { return null; } }
@@ -2509,8 +2527,19 @@ function initResizer(name) {
 function initResizers() {
   initResizer('nav');
   initResizer('inv');
+  initResizer('list');
   // A smaller window shouldn't leave the side columns crowding out the articles.
-  window.addEventListener('resize', () => { restorePane('nav'); restorePane('inv'); });
+  let paneTimer = 0;
+  window.addEventListener('resize', () => {
+    restorePane('nav'); restorePane('inv'); restorePane('list');
+    hideMenu(false);
+    // Crossing the reading pane's minimum width switches the layout (and the header's Pane button).
+    clearTimeout(paneTimer);
+    paneTimer = setTimeout(() => {
+      const paneBtn = !!$('#viewHeader [data-act="pane"]') !== innerWidth >= PANE_MIN_WIDTH;
+      if (S.view.type !== 'home' && (document.body.classList.contains('pane') !== paneOn() || paneBtn)) render();
+    }, 150);
+  });
 }
 
 /** Plain text answers with [n] article citations, links, bullets, headings and bold. */
@@ -2815,6 +2844,8 @@ function openSettings() {
   $('#relayToken').value = S.settings.relayToken;
   $('#relayStatus').textContent = '';
   $('#includeKeys').checked = false;
+  renderAppInfo();
+  renderABSettings();
   if (!d.open) d.showModal();
 }
 
@@ -2873,14 +2904,18 @@ function exportOPML(onlyFolder) {
 const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'investigations', 'collapsed', 'days', 'settings'];
 const isPerFeedKey = (k) => k.startsWith('own:') || k.startsWith('vec:');
 
-async function exportBackup(includeKeys) {
+async function buildBackup(includeKeys) {
   await flush();
   const data = {};
   for (const k of BACKUP_KEYS) if (store.get(k) !== undefined) data[k] = store.get(k);
   data.ownItems = {};
   for (const k of store.keys()) if (k.startsWith('own:')) data.ownItems[k.slice(4)] = store.get(k);
   if (data.settings && !includeKeys) { data.settings = { ...data.settings, keys: {}, relayToken: '' }; }
-  const backup = { app: 'salareader', version: 1, exported: new Date().toISOString(), includesKeys: !!includeKeys, data };
+  return { app: 'salareader', version: 1, exported: new Date().toISOString(), includesKeys: !!includeKeys, data };
+}
+
+async function exportBackup(includeKeys) {
+  const backup = await buildBackup(includeKeys);
   download(`salareader-backup-${today()}.json`, JSON.stringify(backup), 'application/json');
   toast(includeKeys ? 'Backup saved, including your API keys: keep the file private' : 'Backup saved (API keys left out)', 4000);
 }
@@ -2890,6 +2925,11 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 async function importBackup(file) {
   let backup;
   try { backup = JSON.parse(await file.text()); } catch { throw new Error("That file isn't a Sala Reader backup."); }
+  if (backup?.app === 'salareader' && backup.encrypted) {
+    const pass = await askPass({ title: 'Encrypted backup', hint: 'Type the passphrase you chose for your automatic backups.' });
+    if (!pass) return false;
+    backup = await decryptBackup(backup, pass);
+  }
   const d = backup?.data;
   const bad = backup?.app !== 'salareader' || !isObj(d)
     || ('subs' in d && !Array.isArray(d.subs)) || ['read', 'starred', 'collapsed', 'settings', 'ownItems'].some((k) => k in d && !isObj(d[k]))
@@ -2914,11 +2954,12 @@ async function importBackup(file) {
 
 async function eraseEverything() {
   stopRefresh = true;
+  try { indexedDB.deleteDatabase('salareader-folder'); } catch { /* none */ }
   for (const k of store.keys()) store.del(k);
   await clearBodies();
   frozen = true;
   await flush();
-  try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k?.startsWith('sr.')) localStorage.removeItem(k); } } catch { /* blocked */ }
+  try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k?.startsWith('sr.') || k?.startsWith('srl.')) localStorage.removeItem(k); } } catch { /* blocked */ }
 }
 
 async function importOPML(file) {
@@ -3059,11 +3100,7 @@ function wire() {
       if (article && act === 'summarize') { summarize(article); return; }
       if (article && act === 'fullarticle') { showFullArticle(article, e.target.closest('[data-act]')); return; }
       if (article && act === 'related') { related(article); return; }
-      if (article && act === 'digdeeper') {
-        const it = S.byId.get(article.dataset.id) || S.starred[article.dataset.id];
-        if (it) startInvestigation({ query: it.t.replace(/\s+[-–|]\s+[^-–|]{2,40}$/, '').slice(0, 120), name: it.t.slice(0, 80), articleId: it.id });
-        return;
-      }
+      if (article && act === 'digdeeper') { digDeeper(S.byId.get(article.dataset.id) || S.starred[article.dataset.id]); return; }
       if (act.startsWith('inv') && invAction(act, btn)) return;
       if (act === 'investigate') {
         const v = S.view;
@@ -3093,6 +3130,8 @@ function wire() {
         }
         case 'list': setMode('list'); return;
         case 'expanded': setMode('expanded'); return;
+        case 'pane': setMode('pane'); return;
+        case 'resumebackup': abWrite(true); return;
         case 'markall': btn.closest('details')?.removeAttribute('open'); markAllRead(sourceItems()); return;
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
@@ -3385,6 +3424,14 @@ function wire() {
     // Keys pressed with nothing focused can come from the document itself.
     const el = e.target instanceof Element ? e.target : document.body;
     // In the investigation panel: Enter asks (Shift+Enter for a new line), Esc closes it.
+    // Ctrl+K / ⌘K: the command palette, from anywhere.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if ($('#cmdk').open) $('#cmdk').close();
+      else if (!document.querySelector('dialog[open]')) openCmd();
+      return;
+    }
+    if (e.key === 'Escape' && !$('#aaPop').hidden) { closeAa(); return; }
     if (S.invOpen && el.closest('#invPanel')) {
       if (e.key === 'Enter' && !e.shiftKey && el.id === 'invInput') { e.preventDefault(); $('#invForm').requestSubmit(); }
       else if (e.key === 'Escape') { e.preventDefault(); closeInvestigation(); }
@@ -3425,9 +3472,22 @@ function wire() {
       case '/': e.preventDefault(); $('#q').focus(); $('#q').select(); break;
       case 'x': surprise(); break;
       case 'r': refresh(); break;
-      case 'u': if (innerWidth < 860) { if (document.body.classList.contains('nav-open')) closeSidebar(); else openSidebar(); } else document.body.classList.toggle('nav-hidden'); break;
+      case 'u': toggleNav(); break;
       case '1': setMode('list'); break;
       case '2': setMode('expanded'); break;
+      case '3': setMode('pane'); break;
+      case '+': case '=': readSize(1); break;
+      case '-': case '_': readSize(-1); break;
+      case ' ': {
+        // Reading pane: Space pages through the article, then moves to the next one.
+        if (!paneOn() || e.target.closest?.('#list button, #list a')) return;
+        const r = $('#reader');
+        const atEnd = r.scrollTop + r.clientHeight >= r.scrollHeight - 4;
+        if (e.shiftKey) r.scrollBy({ top: -r.clientHeight * 0.85, behavior: 'smooth' });
+        else if (atEnd || !r.dataset.id) select(S.cur + 1);
+        else r.scrollBy({ top: r.clientHeight * 0.85, behavior: 'smooth' });
+        break;
+      }
       case 'g': gPending = true; setTimeout(() => { gPending = false; }, 1200); break;
       case '?': $('#helpDialog').showModal(); break;
       default: return;
@@ -3437,7 +3497,10 @@ function wire() {
 }
 
 function setMode(mode) {
-  setViewPref('mode', mode);
+  // The layout (list, expanded, reading pane) applies everywhere.
+  S.settings.mode = S.settings.defaultMode = mode;
+  for (const p of Object.values(S.settings.viewPrefs || {})) delete p.mode;
+  saveSettings();
   if (S.view.type !== 'home') render();
 }
 
@@ -3517,12 +3580,665 @@ async function refresh() {
   toast(S.index.updated !== before ? 'Fresh articles loaded' : `Up to date (feeds updated ${agoText(S.index.updated)})`);
 }
 
+// ---------- desktop: reading pane ----------
+
+/** Below this window width the reading pane falls back to the list view. */
+const PANE_MIN_WIDTH = 1000;
+const paneOn = () => S.settings.mode === 'pane' && innerWidth >= PANE_MIN_WIDTH && S.view.type !== 'home' && !(S.view.type === 'folder' && S.view.id === RETIRED);
+/** Articles open inside the list (list view, or the pane on a narrow window). */
+const listMode = () => S.settings.mode === 'list' || (S.settings.mode === 'pane' && !paneOn());
+
+function readerEmpty() {
+  const r = $('#reader');
+  if (!r) return;
+  delete r.dataset.id;
+  r.innerHTML = `<div class="reader-empty"><p class="big" aria-hidden="true">📖</p><p>Pick an article, or press <kbd>j</kbd>.</p><p class="hint"><kbd>Space</kbd> pages through it, then on to the next.</p></div>`;
+}
+
+function showInReader(id) {
+  const r = $('#reader');
+  const it = S.byId.get(id) || S.starred[id];
+  if (!r || !it || r.dataset.id === id) return;
+  r.dataset.id = id;
+  // Same markup as an open article in the list, so every button works the same.
+  r.innerHTML = `<article class="entry open pane-article" data-id="${esc(id)}"><div class="body">${bodyHTML(it)}</div></article>`;
+  r.scrollTop = 0;
+  fillContent(r.firstElementChild);
+}
+
+function toggleNav() {
+  if (innerWidth < 860 || (document.body.classList.contains('inv-open') && innerWidth <= 1360)) {
+    if (document.body.classList.contains('nav-open')) closeSidebar(); else openSidebar();
+  } else document.body.classList.toggle('nav-hidden');
+}
+
+function digDeeper(it) {
+  if (it) startInvestigation({ query: it.t.replace(/\s+[-–|]\s+[^-–|]{2,40}$/, '').slice(0, 120), name: it.t.slice(0, 80), articleId: it.id });
+}
+
+const copyText = (text, msg) => navigator.clipboard?.writeText(text).then(() => toast(msg)).catch(() => toast("Couldn't copy"));
+
+// ---------- desktop: text size and font ----------
+
+const READ_SIZES = [13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28];
+const readBase = () => (S.settings.theme === 'classic' ? 14 : 18);
+
+function applyReading() {
+  const r = S.settings.read || {};
+  const st = document.documentElement.style;
+  const set = (k, v) => (v ? st.setProperty(k, v) : st.removeProperty(k));
+  set('--read-size', r.size ? r.size + 'px' : '');
+  set('--read-family', r.font === 'sans' ? 'var(--font)' : r.font === 'serif' ? 'Georgia, "Iowan Old Style", "Times New Roman", serif' : '');
+  set('--read-measure', { narrow: '64ch', wide: '108ch' }[r.width] || '');
+  set('--read-lh', { tight: '1.45', loose: '1.9' }[r.lh] || '');
+  renderAa();
+}
+
+function setReading(k, v) {
+  S.settings.read = { ...S.settings.read, [k]: v };
+  if (v == null) delete S.settings.read[k];
+  saveSettings();
+  applyReading();
+}
+
+function readSize(step) {
+  const base = readBase();
+  const cur = S.settings.read?.size || base;
+  let next = base;
+  if (step) {
+    const i = READ_SIZES.indexOf(cur);
+    const at = i >= 0 ? i : READ_SIZES.findIndex((x) => x > cur) - (step > 0 ? 1 : 0);
+    next = READ_SIZES[Math.max(0, Math.min(READ_SIZES.length - 1, at + step))];
+  }
+  setReading('size', next === base ? null : next);
+  toast(`Text size ${next}${next === base ? ' (normal)' : ''}`, 1000);
+}
+
+function renderAa() {
+  const pop = $('#aaPop');
+  if (!pop) return;
+  const r = S.settings.read || {};
+  $('#aaSize').textContent = r.size || readBase();
+  for (const [attr, val] of [['font', r.font || 'auto'], ['width', r.width || 'medium'], ['lh', r.lh || 'normal']]) {
+    for (const b of pop.querySelectorAll(`[data-aa-${attr}]`)) { const on = b.dataset[`aa${attr[0].toUpperCase()}${attr.slice(1)}`] === val; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); }
+  }
+}
+
+function openAa() {
+  const pop = $('#aaPop');
+  const r = $('#aaBtn').getBoundingClientRect();
+  pop.hidden = false;
+  pop.style.top = r.bottom + 6 + 'px';
+  pop.style.right = Math.max(8, innerWidth - r.right) + 'px';
+  $('#aaBtn').setAttribute('aria-expanded', 'true');
+  renderAa();
+  pop.querySelector('button')?.focus();
+}
+function closeAa() {
+  if ($('#aaPop').hidden) return;
+  $('#aaPop').hidden = true;
+  $('#aaBtn').setAttribute('aria-expanded', 'false');
+  $('#aaBtn').focus();
+}
+
+// ---------- desktop: installable app, kept storage, app badge ----------
+
+let installEvent = null;
+const isInstalled = () => matchMedia('(display-mode: standalone), (display-mode: window-controls-overlay)').matches || navigator.standalone === true;
+
+function showInstall() {
+  const can = !!installEvent && !isInstalled();
+  $('#installBtn').hidden = !can;
+  $('#installApp').hidden = !can;
+}
+
+async function installApp() {
+  if (!installEvent) return;
+  installEvent.prompt();
+  await installEvent.userChoice.catch(() => {});
+  installEvent = null;
+  showInstall();
+}
+
+/** Asks the browser never to clear this site's data to free space (Safari: nor after 7 days away). */
+async function keepStorage(ask) {
+  if (!navigator.storage?.persist) return null;
+  if (await navigator.storage.persisted()) return true;
+  // Firefox asks the person, so only when they press the button; the others decide quietly.
+  if (!ask && /firefox/i.test(navigator.userAgent)) return false;
+  return navigator.storage.persist().catch(() => false);
+}
+
+async function renderAppInfo() {
+  const el = $('#appInfo');
+  const kept = navigator.storage?.persisted ? await navigator.storage.persisted().catch(() => false) : null;
+  const est = navigator.storage?.estimate ? await navigator.storage.estimate().catch(() => null) : null;
+  const mb = est?.usage ? ` It uses about ${Math.max(1, Math.round(est.usage / 1048576))} MB.` : '';
+  const safari = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent);
+  const app = isInstalled() ? 'Running as an installed app, in its own window.'
+    : installEvent ? 'Install it to get its own window and a Dock or taskbar icon with your unread count. It opens offline too.'
+    : safari ? 'To install it in Safari on a Mac: <b>File → Add to Dock</b>. Installed, Safari keeps your data even if you are away for a while.'
+    : 'Chrome and Edge can install it as an app with its own window (look for the install icon in the address bar).';
+  const store = kept === true ? '✓ Your data is kept permanently: the browser won\'t clear it to free space.'
+    : kept === false ? 'The browser may clear your data if the disk runs low. Press <b>Keep my data permanently</b>, and keep a backup.'
+    : '';
+  el.innerHTML = `${app} ${store}${mb}`;
+  $('#persistBtn').hidden = kept !== false;
+}
+
+function initDesktop() {
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
+  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvent = e; showInstall(); });
+  addEventListener('appinstalled', () => { installEvent = null; showInstall(); toast('Installed: Sala Reader now has its own window', 4000); });
+  keepStorage(false);
+  showInstall();
+  $('#installBtn').addEventListener('click', installApp);
+  $('#installApp').addEventListener('click', installApp);
+  $('#persistBtn').addEventListener('click', async () => {
+    const ok = await keepStorage(true);
+    toast(ok ? '✓ Your data will be kept' : "The browser said no. Installing the app, or bookmarking the page, usually changes that.", 5000);
+    renderAppInfo();
+  });
+
+  // Text size and font
+  $('#aaBtn').addEventListener('click', () => ($('#aaPop').hidden ? openAa() : closeAa()));
+  $('#aaPop').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.aa === 'bigger') readSize(1);
+    else if (b.dataset.aa === 'smaller') readSize(-1);
+    else if (b.dataset.aa === 'reset') readSize(0);
+    else if (b.dataset.aaFont) setReading('font', b.dataset.aaFont === 'auto' ? null : b.dataset.aaFont);
+    else if (b.dataset.aaWidth) setReading('width', b.dataset.aaWidth === 'medium' ? null : b.dataset.aaWidth);
+    else if (b.dataset.aaLh) setReading('lh', b.dataset.aaLh === 'normal' ? null : b.dataset.aaLh);
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!$('#aaPop').hidden && !e.target.closest('#aaPop, #aaBtn')) { $('#aaPop').hidden = true; $('#aaBtn').setAttribute('aria-expanded', 'false'); }
+    if (!$('#ctxMenu').hidden && !e.target.closest('#ctxMenu')) hideMenu(false);
+  });
+
+  // Right-click menus
+  document.addEventListener('contextmenu', onContextMenu);
+  $('#ctxMenu').addEventListener('click', (e) => {
+    const b = e.target.closest('.ctx-item');
+    if (!b) return;
+    const item = $('#ctxMenu')._items?.[+b.dataset.i];
+    hideMenu(true);
+    item?.run();
+  });
+  $('#ctxMenu').addEventListener('keydown', (e) => {
+    const items = [...$('#ctxMenu').querySelectorAll('.ctx-item')];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') items[(i + 1) % items.length].focus();
+    else if (e.key === 'ArrowUp') items[(i - 1 + items.length) % items.length].focus();
+    else if (e.key === 'Home') items[0].focus();
+    else if (e.key === 'End') items[items.length - 1].focus();
+    else if (e.key === 'Escape' || e.key === 'Tab') hideMenu(true);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  addEventListener('scroll', () => hideMenu(false), true);
+  addEventListener('blur', () => hideMenu(false));
+
+  // Command palette
+  $('#cmdkInput').addEventListener('input', () => { cmdSel = 0; renderCmd(); });
+  $('#cmdkInput').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      cmdSel = (cmdSel + (e.key === 'ArrowDown' ? 1 : -1) + cmdShown.length) % Math.max(1, cmdShown.length);
+      markCmd();
+    } else if (e.key === 'Enter') { e.preventDefault(); runCmd(cmdShown[cmdSel]); }
+  });
+  $('#cmdkList').addEventListener('click', (e) => { const li = e.target.closest('[data-i]'); if (li) runCmd(cmdShown[+li.dataset.i]); });
+  $('#cmdk').addEventListener('click', (e) => { if (e.target === $('#cmdk')) $('#cmdk').close(); });
+
+  // Automatic backup
+  $('#abChoose').addEventListener('click', abChoose);
+  $('#abNow').addEventListener('click', () => abWrite(true));
+  $('#abStop').addEventListener('click', () => {
+    if (!confirm('Stop the automatic backups? The files already in the folder stay.')) return;
+    abStop().then(() => { renderABSettings(); renderSidebar(); });
+  });
+  $('#abEncrypt').addEventListener('change', async (e) => {
+    if (e.target.checked) {
+      const pass = await askPass({ title: 'Encrypt your backups', hint: "Choose a passphrase. You'll need it to restore a backup, and it can't be recovered if you forget it.", twice: true });
+      if (!pass) { e.target.checked = false; return; }
+      saveAB({ encrypt: true, pass });
+    } else saveAB({ encrypt: false, pass: '' });
+    if (abState()?.name) abWrite(true); else renderABSettings();
+  });
+  abCheck();
+  setInterval(() => abWrite(false), 36e5);
+  setTimeout(() => abWrite(false), 20000);
+}
+
+// ---------- desktop: right-click menus ----------
+
+let ctxReturn = null;
+
+function showMenu(x, y, items) {
+  const m = $('#ctxMenu');
+  ctxReturn = document.activeElement;
+  m._items = items;
+  m.innerHTML = items.map((it, i) => (it === '-'
+    ? '<div class="ctx-sep" role="separator"></div>'
+    : `<button type="button" role="menuitem" tabindex="-1" class="ctx-item${it.danger ? ' danger' : ''}" data-i="${i}"><span>${esc(it.label)}</span>${it.key ? `<kbd>${esc(it.key)}</kbd>` : ''}</button>`)).join('');
+  m.hidden = false;
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + 'px';
+  m.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 4)) + 'px';
+  m.querySelector('.ctx-item')?.focus({ preventScroll: true });
+}
+
+function hideMenu(restore) {
+  const m = $('#ctxMenu');
+  if (!m || m.hidden) return;
+  m.hidden = true;
+  m.innerHTML = '';
+  if (restore) ctxReturn?.focus?.({ preventScroll: true });
+}
+
+function onContextMenu(e) {
+  const t = e.target instanceof Element ? e.target : null;
+  // Text, links inside articles, fields and selections keep the browser's own menu.
+  if (!t || t.closest('input, textarea, select, [contenteditable], .content, .ai-out, .related, #invPanel, dialog, #ctxMenu') || String(getSelection()).trim()) return;
+  const items = menuFor(t);
+  if (!items?.length) return;
+  e.preventDefault();
+  let { clientX: x, clientY: y } = e;
+  if (!x && !y) { const r = (t.closest('.row, .nav-item, h2') || t).getBoundingClientRect(); x = r.left + 24; y = r.bottom; }
+  showMenu(x, y, items);
+}
+
+function menuFor(t) {
+  const art = t.closest('#list article.entry, #reader article.entry');
+  if (art) return articleMenu(art);
+  const feedRow = t.closest('#sidebar a.feed[data-feed]');
+  if (feedRow) return feedMenu(feedRow.dataset.feed);
+  const folderRow = t.closest('#sidebar .folder-row[data-drop]');
+  if (folderRow) return folderMenu(folderRow.dataset.drop);
+  const invRow = t.closest('#sidebar [data-inv]');
+  if (invRow) return invMenu(invRow.dataset.inv);
+  const nav = t.closest('#sidebar a.nav-item[href^="#/"]');
+  if (nav) return navMenu(nav.getAttribute('href'));
+  return null;
+}
+
+function articleMenu(art) {
+  const id = art.dataset.id;
+  const it = S.byId.get(id) || S.starred[id];
+  if (!it) return null;
+  const inList = !!art.closest('#list');
+  const idx = S.list.findIndex((x) => x.id === id);
+  const link = safeUrl(it.l);
+  const f = S.feedById.get(it.f);
+  const items = [];
+  if (inList && !(paneOn() && $('#reader').dataset.id === id)) items.push({ label: art.classList.contains('open') ? 'Close' : 'Open', key: 'o', run: () => (art.classList.contains('open') ? closeEntry(art) : toggleEntry(art)) });
+  items.push(
+    { label: S.starred[id] ? '★ Unstar' : '☆ Star', key: 's', run: () => toggleStar(id) },
+    { label: isRead(id) ? 'Mark as unread' : 'Mark as read', key: 'm', run: () => { S.view.keep?.add(id); markRead(id, !isRead(id)); } },
+  );
+  if (idx >= 0) {
+    if (idx > 0) items.push('-', { label: `Mark the ${idx} above as read`, run: () => markAllRead(S.list.slice(0, idx)) });
+    if (idx < S.list.length - 1) items.push(idx > 0 ? null : '-', { label: `Mark the ${S.list.length - idx - 1} below as read`, run: () => markAllRead(S.list.slice(idx + 1)) });
+  }
+  if (link) items.push('-', { label: 'Open original in a new tab', key: 'v', run: () => window.open(link, '_blank', 'noopener,noreferrer') }, { label: 'Copy link', run: () => copyText(link, 'Link copied') });
+  items.push('-', { label: '🕵️ Dig deeper', run: () => digDeeper(it) });
+  if (f && !(S.view.type === 'feed' && S.view.id === f.id)) items.push({ label: `Go to ${f.title}`, run: () => go(`#/feed/${f.id}`) });
+  return items.filter(Boolean);
+}
+
+function feedMenu(id) {
+  const f = S.feedById.get(id);
+  if (!f) return null;
+  const sub = liveSub(f.url);
+  return [
+    { label: 'Open', run: () => go(`#/feed/${id}`) },
+    { label: 'Mark all as read', run: () => markAllRead(S.items.filter((i) => i.f === id)) },
+    ...(f.own && sub ? [{ label: '⟳ Refresh this feed', run: () => { toast(`Refreshing ${f.title}…`, 1500); fetchOwnFeed({ ...sub }).catch((err) => noteFeedError(sub, err)).finally(() => { rebuild(); renderSidebar(); renderHeaderCounts(); toast(sub.error ? sub.error : `✓ ${sub.title} is up to date`, 3000); }); } }] : []),
+    '-',
+    { label: '✎ Edit name and folders…', run: () => openEditFeed(id) },
+    { label: 'Copy feed address', run: () => copyText(f.url, 'Address copied') },
+    { label: '⇪ Share as OPML', run: () => exportFeedOPML(f) },
+    '-',
+    { label: 'Unsubscribe…', danger: true, run: () => { if (!confirm(`Unsubscribe from ${f.title}?`)) return; unsubscribe(id); if (S.view.type === 'feed' && S.view.id === id) go('#/home'); else render(); } },
+  ];
+}
+
+function exportFeedOPML(f) {
+  const x = (v) => esc(v);
+  download(`${(f.title || 'feed').replace(/[^\w-]+/g, '-').slice(0, 40)}.opml`, `<?xml version="1.0" encoding="UTF-8"?>\n<opml version="2.0"><head><title>${x(f.title)}</title></head><body><outline type="rss" text="${x(f.title)}" title="${x(f.title)}" xmlUrl="${x(f.url)}"${f.site ? ` htmlUrl="${x(f.site)}"` : ''}/></body></opml>\n`, 'text/x-opml');
+}
+
+function folderMenu(name) {
+  if (name === RETIRED) return [{ label: 'Open', run: () => go(`#/folder/${RETIRED}`) }];
+  const ids = new Set(S.feeds.filter((f) => feedFolders(f).includes(name)).map((f) => f.id));
+  return [
+    { label: 'Open', run: () => go(`#/folder/${encodeURIComponent(name)}`) },
+    { label: 'Mark all as read', run: () => markAllRead(S.items.filter((i) => ids.has(i.f))) },
+    '-',
+    { label: '✎ Rename…', run: () => openFolderDialog(name, 'rename') },
+    { label: '⇪ Share folder (OPML)', run: () => exportOPML(name) },
+    '-',
+    { label: 'Delete folder…', danger: true, run: () => openFolderDialog(name, 'delete') },
+  ];
+}
+
+function navMenu(href) {
+  const [, type, raw] = href.match(/^#\/(\w+)\/?(.*)$/) || [];
+  const id = decodeURIComponent(raw || '');
+  if (type === 'all') return [{ label: 'Open', run: () => go(href) }, { label: 'Mark everything as read', run: () => { if (confirm('Mark every article as read?')) markAllRead(S.items); } }];
+  if (type === 'starred') return [{ label: 'Open', run: () => go(href) }];
+  if (type === 'smart') return [{ label: 'Open', run: () => go(href) }, { label: 'Mark all as read', run: () => markAllRead(S.smart?.get(id) || []) }];
+  if (type === 'topic') {
+    const t = S.topics.find((x) => x.id === id);
+    if (!t) return null;
+    return [
+      { label: 'Open', run: () => go(href) },
+      { label: 'Mark all as read', run: () => markAllRead(topicMatches(t).items) },
+      { label: '🕵️ Investigate', run: () => startInvestigation({ query: t.query, name: t.name }) },
+      '-',
+      { label: '✎ Rename…', run: () => { const n = prompt('Topic name', t.name); if (n?.trim()) { t.name = n.trim(); store.set('topics', S.topics); render(); } } },
+      { label: 'Delete topic…', danger: true, run: () => { if (!confirm(`Delete the topic “${t.name}”?`)) return; S.topics = S.topics.filter((x) => x.id !== t.id); store.set('topics', S.topics); if (S.view.type === 'topic' && S.view.id === t.id) go('#/home'); else renderSidebar(); } },
+    ];
+  }
+  return null;
+}
+
+function invMenu(id) {
+  const inv = invById(id);
+  if (!inv) return null;
+  return [
+    S.invOpen === id ? { label: 'Close', run: closeInvestigation } : { label: 'Open', run: () => openInvestigation(id) },
+    { label: 'Export notes (Markdown)', run: () => exportInv(inv) },
+    '-',
+    { label: 'Delete…', danger: true, run: () => { if (!confirm(`Delete the investigation “${inv.name}” and its notes?`)) return; S.invs = S.invs.filter((x) => x.id !== id); saveInvs(); if (S.invOpen === id) closeInvestigation(); else renderSidebar(); } },
+  ];
+}
+
+// ---------- desktop: command palette (Ctrl+K / ⌘K) ----------
+
+let cmdShown = [];
+let cmdSel = 0;
+
+function cmdItems(q) {
+  const v = S.view;
+  const out = [];
+  const go_ = (label, hash, icon, kind, hint = '') => out.push({ label, icon, kind, hint, run: () => go(hash) });
+  const act = (label, run, icon, key) => out.push({ label, icon, kind: 'Command', key, run });
+  go_('Home', '#/home', '🏠', 'Go to', 'g h');
+  go_('All items', '#/all', '📚', 'Go to', 'g a');
+  go_('Starred', '#/starred', '⭐', 'Go to', 'g s');
+  act('Refresh', refresh, '⟳', 'r');
+  act('Subscribe to a feed…', openAdd, '＋');
+  act('New AI topic…', () => openTopic(), '✨');
+  if (v.type !== 'home') {
+    act('Mark all here as read', () => markAllRead(sourceItems()), '✓', 'Shift+A');
+    act('Brief me on this list', brief, '✨');
+  }
+  act('Surprise me', surprise, '🎲', 'x');
+  act('Layout: list', () => setMode('list'), '☰', '1');
+  act('Layout: expanded', () => setMode('expanded'), '▤', '2');
+  act('Layout: reading pane', () => setMode('pane'), '◫', '3');
+  if (v.type !== 'home') {
+    act('Sort: newest first', () => { setViewPref('sort', 'newest'); render(); }, '↓');
+    act('Sort: oldest first', () => { setViewPref('sort', 'oldest'); render(); }, '↑');
+    act('Show unread only', () => { setViewPref('unreadOnly', true); render(); }, '●');
+    act('Show all articles', () => { setViewPref('unreadOnly', false); render(); }, '○');
+  }
+  act('Text: bigger', () => readSize(1), 'A', '+');
+  act('Text: smaller', () => readSize(-1), 'A', '−');
+  act('Text: normal size', () => readSize(0), 'A');
+  act('Font: serif', () => setReading('font', 'serif'), 'A');
+  act('Font: sans-serif', () => setReading('font', 'sans'), 'A');
+  act('Text and font settings…', openAa, 'Aa');
+  for (const [id, name] of [['auto', 'match my system'], ['light', 'light'], ['dark', 'dark'], ['paper', 'paper'], ['classic', 'Classic 2008']]) act(`Theme: ${name}`, () => { S.settings.theme = id; saveSettings(); applyTheme(); applyReading(); }, '🎨');
+  act('Show or hide the sidebar', toggleNav, '◧', 'u');
+  act('Settings', openSettings, '⚙');
+  act('Keyboard shortcuts', () => $('#helpDialog').showModal(), '⌨', '?');
+  act('Export backup', () => exportBackup(false), '💾');
+  if (abState()?.name) act('Back up now to your folder', () => abWrite(true), '💾');
+  act('Export subscriptions (OPML)', () => exportOPML(), '⇪');
+  if (installEvent && !isInstalled()) act('Install Sala Reader as an app', installApp, '⤓');
+  PROVIDERS.forEach((p, i) => act(`AI assistant: ${p.name}`, () => switchProvider(p.id), '🤖', `Alt+${i + 1}`));
+  for (const name of allFolderNames()) go_(name, `#/folder/${encodeURIComponent(name)}`, '📁', 'Folder');
+  for (const t of S.topics) go_(t.name, `#/topic/${t.id}`, '✨', 'AI topic');
+  if (S.smart) for (const [id, items] of S.smart) if (items.some((i) => !isRead(i.id))) { const i = smartInfo(id); go_(i.name, `#/smart/${encodeURIComponent(id)}`, i.icon, 'Smart folder'); }
+  for (const inv of S.invs || []) out.push({ label: inv.name, icon: '🕵️', kind: 'Investigation', run: () => openInvestigation(inv.id) });
+  for (const f of S.feeds) out.push({ label: f.title, icon: '📰', kind: 'Feed', hint: feedFolders(f).filter(Boolean).join(', '), run: () => go(`#/feed/${f.id}`) });
+  if (q) {
+    out.push({ always: true, label: `Search by meaning: “${q}”`, icon: '🔍', kind: 'Search', run: () => go(`#/search/${encodeURIComponent(q)}`) });
+    out.push({ always: true, label: `Investigate “${q}”`, icon: '🕵️', kind: 'Command', run: () => startInvestigation({ query: q }) });
+    out.push({ always: true, label: `Follow news about “${q}”`, icon: '📰', kind: 'Command', run: () => addFeed(q, '').then((feed) => { toast(`Following ${feed.title}`); go(`#/feed/${feed.id}`); }).catch((err) => toast(err.message, 5000)) });
+  }
+  return out;
+}
+
+/** How well a label matches what was typed (-1: not at all). */
+function cmdScore(label, q) {
+  const s = label.toLowerCase();
+  const i = s.indexOf(q);
+  if (i === 0) return 100 - s.length / 100;
+  if (i > 0) return (/[\s:(“/-]/.test(s[i - 1]) ? 80 : 60) - i / 50;
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length > 1 && words.every((w) => s.includes(w))) return 50;
+  let j = 0, gaps = 0, last = -1;
+  for (let k = 0; k < s.length && j < q.length; k++) if (s[k] === q[j]) { if (last >= 0) gaps += k - last - 1; last = k; j++; }
+  return j === q.length && gaps < 12 ? 30 - gaps : -1;
+}
+
+function renderCmd() {
+  const q = $('#cmdkInput').value.trim().toLowerCase();
+  const all = cmdItems($('#cmdkInput').value.trim());
+  cmdShown = q
+    ? [...all.filter((x) => !x.always).map((x) => [x, cmdScore(x.label, q)]).filter(([, n]) => n >= 0).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([x]) => x), ...all.filter((x) => x.always)]
+    : all.filter((x) => x.kind === 'Go to' || x.kind === 'Command');
+  cmdSel = Math.min(cmdSel, Math.max(0, cmdShown.length - 1));
+  $('#cmdkList').innerHTML = cmdShown.length
+    ? cmdShown.map((x, i) => `<li role="option" id="cmd-${i}" data-i="${i}" aria-selected="${i === cmdSel}"><span class="ci" aria-hidden="true">${esc(x.icon)}</span><span class="cl">${esc(x.label)}</span><span class="ck">${esc(x.hint || x.kind)}</span>${x.key ? `<kbd>${esc(x.key)}</kbd>` : ''}</li>`).join('')
+    : '<li class="cmdk-none" role="presentation">Nothing matches.</li>';
+  markCmd();
+}
+
+function markCmd() {
+  for (const li of $('#cmdkList').querySelectorAll('[data-i]')) li.setAttribute('aria-selected', String(+li.dataset.i === cmdSel));
+  const cur = $(`#cmd-${cmdSel}`);
+  if (cur) { $('#cmdkInput').setAttribute('aria-activedescendant', cur.id); cur.scrollIntoView({ block: 'nearest' }); }
+  else $('#cmdkInput').removeAttribute('aria-activedescendant');
+}
+
+function openCmd() {
+  hideMenu(false);
+  $('#cmdkInput').value = '';
+  cmdSel = 0;
+  renderCmd();
+  $('#cmdk').showModal();
+  $('#cmdkInput').focus();
+}
+
+function runCmd(item) {
+  if (!item) return;
+  $('#cmdk').close();
+  closeSidebar();
+  item.run();
+}
+
+// ---------- desktop: automatic backup to a folder ----------
+
+const AB_KEEP = 7;
+const abSupported = () => 'showDirectoryPicker' in window;
+const abState = () => store.get('autoBackup', null); // { name, last, encrypt, pass, error, broken }
+const saveAB = (patch) => store.set('autoBackup', { ...abState(), ...patch });
+
+// The folder itself lives in its own small database, read only when a backup runs:
+// some private windows crash while reading a saved folder, and the reader must still open.
+const HANDLE_DB = 'salareader-folder';
+let abDir = null;
+function handleOp(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(HANDLE_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('h');
+    r.onerror = () => reject(r.error);
+    r.onsuccess = () => {
+      const db = r.result;
+      const tx = db.transaction('h', mode);
+      const req = fn(tx.objectStore('h'));
+      tx.oncomplete = () => { db.close(); resolve(req?.result); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+async function abFolder() {
+  if (abDir) return abDir;
+  const ab = abState();
+  if (!ab?.name || ab.broken) return null;
+  // If the last read never finished (the window crashed), don't try again here.
+  try {
+    if (localStorage.getItem('srl.abReading')) { localStorage.removeItem('srl.abReading'); saveAB({ broken: true }); return null; }
+    localStorage.setItem('srl.abReading', '1');
+  } catch { /* blocked */ }
+  try { abDir = (await handleOp('readonly', (st) => st.get('dir'))) || null; } catch { abDir = null; }
+  try { localStorage.removeItem('srl.abReading'); } catch { /* blocked */ }
+  return abDir;
+}
+async function setABFolder(dir) {
+  abDir = dir;
+  await handleOp('readwrite', (st) => (dir ? st.put(dir, 'dir') : st.delete('dir')));
+}
+
+/** At start: is the folder still allowed? (Browsers ask again after a restart unless the app is installed.) */
+async function abCheck() {
+  if (!abState()?.name || !abSupported()) return;
+  const dir = await abFolder();
+  if (!dir) { renderSidebar(); return; }
+  try { S.abPaused = (await dir.queryPermission({ mode: 'readwrite' })) !== 'granted'; } catch { S.abPaused = true; }
+  if (S.abPaused) renderSidebar();
+}
+
+async function abChoose() {
+  let dir;
+  try { dir = await window.showDirectoryPicker({ id: 'salareader-backup', mode: 'readwrite', startIn: 'documents' }); } catch { return; }
+  try { await setABFolder(dir); } catch (err) { toast(`This browser can't remember the folder: ${err.message || err}`, 5000); return; }
+  saveAB({ name: dir.name, last: 0, error: '', broken: false });
+  await abWrite(true);
+  if (!abState()?.error) toast(`✓ Backing up to “${dir.name}” every day`, 4000);
+}
+
+async function abStop() {
+  store.del('autoBackup');
+  abDir = null;
+  S.abPaused = false;
+  await setABFolder(null).catch(() => {});
+}
+
+/** Writes today's backup if it's due (or now, when asked). */
+async function abWrite(force) {
+  const ab = abState();
+  if (!ab?.name || !abSupported()) return;
+  if (!force && ab.last && Date.now() - ab.last < 20 * 36e5) return;
+  const dir = await abFolder();
+  if (!dir) { if (force) toast('Choose the backup folder again (Settings → Automatic backup)', 5000); renderABSettings(); return; }
+  let perm = 'denied';
+  try {
+    perm = await dir.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted' && force) perm = await dir.requestPermission({ mode: 'readwrite' });
+  } catch { /* the folder is gone */ }
+  S.abPaused = perm !== 'granted';
+  if (S.abPaused) { renderSidebar(); renderABSettings(); if (force) toast('The browser needs your OK to write to the backup folder', 4000); return; }
+  try {
+    const encrypt = !!(ab.encrypt && ab.pass);
+    let text = JSON.stringify(await buildBackup(encrypt));
+    if (encrypt) text = JSON.stringify(await encryptBackup(text, ab.pass));
+    const put = async (name) => {
+      const fh = await dir.getFileHandle(name, { create: true });
+      const w = await fh.createWritable();
+      await w.write(text);
+      await w.close();
+    };
+    await put(`salareader-backup-${today()}.json`);
+    await put('salareader-backup.json');
+    const dated = [];
+    for await (const [name, h] of dir.entries()) if (h.kind === 'file' && /^salareader-backup-\d{4}-\d{2}-\d{2}\.json$/.test(name)) dated.push(name);
+    for (const name of dated.sort().reverse().slice(AB_KEEP)) await dir.removeEntry(name).catch(() => {});
+    saveAB({ last: Date.now(), error: '' });
+    if (force) toast(`✓ Backed up to “${ab.name}”${encrypt ? ', encrypted' : ''}`);
+  } catch (err) {
+    saveAB({ error: err.message || String(err) });
+    if (force) toast(`Backup failed: ${err.message || err}`, 5000);
+  }
+  renderSidebar();
+  renderABSettings();
+}
+
+function renderABSettings() {
+  const ok = abSupported();
+  $('#abBox').hidden = !ok;
+  $('#abUnsupported').hidden = ok;
+  if (!ok) return;
+  const ab = abState();
+  const on = !!ab?.name;
+  $('#abEncrypt').checked = !!(ab?.encrypt && ab.pass);
+  $('#abChoose').textContent = on ? 'Change folder…' : 'Choose folder…';
+  $('#abNow').hidden = $('#abStop').hidden = !on;
+  $('#abStatus').textContent = !on ? 'Off.'
+    : ab.broken ? `This window couldn't open the folder “${ab.name}” (private windows often can't). Choose it again in a normal window.`
+    : `${S.abPaused ? '⏸ Paused until you press Back up now (the browser asks before writing to the folder again).' : '✓ On:'} backing up every day to the folder “${ab.name}”${ab.encrypt && ab.pass ? ', encrypted' : ''}.${ab.last ? ` Last backup ${agoText(ab.last)}.` : ''}${ab.error ? ` The last try failed: ${ab.error}` : ''}`;
+}
+
+/** A small passphrase dialog. Resolves to the passphrase, or null if cancelled. */
+function askPass({ title, hint, twice = false }) {
+  const d = $('#passDialog');
+  $('#passTitle').textContent = title;
+  $('#passHint').textContent = hint;
+  $('#pass1').value = $('#pass2').value = '';
+  $('#pass2Wrap').hidden = !twice;
+  $('#passStatus').textContent = '';
+  d.returnValue = '';
+  d.showModal();
+  $('#pass1').focus();
+  return new Promise((resolve) => {
+    const form = d.querySelector('form');
+    const submit = (e) => {
+      if (e.submitter?.value !== 'ok') return;
+      const p = $('#pass1').value;
+      if (p.length < 8) { e.preventDefault(); $('#passStatus').textContent = 'Use at least 8 characters.'; return; }
+      if (twice && p !== $('#pass2').value) { e.preventDefault(); $('#passStatus').textContent = "The two don't match."; return; }
+    };
+    form.addEventListener('submit', submit);
+    d.addEventListener('close', () => { form.removeEventListener('submit', submit); resolve(d.returnValue === 'ok' ? $('#pass1').value : null); $('#pass1').value = $('#pass2').value = ''; }, { once: true });
+  });
+}
+
+// AES-GCM with a key from the passphrase (PBKDF2, SHA-256). Everything happens in this browser.
+const b64 = (buf) => { const a = new Uint8Array(buf); let s = ''; for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode(...a.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function passKey(pass, salt, iterations) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encryptBackup(text, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const iterations = 310000;
+  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await passKey(pass, salt, iterations), new TextEncoder().encode(text));
+  return { app: 'salareader', encrypted: 'AES-GCM/PBKDF2-SHA256', iterations, exported: new Date().toISOString(), salt: b64(salt), iv: b64(iv), data: b64(data) };
+}
+async function decryptBackup(env, pass) {
+  try {
+    const key = await passKey(pass, unb64(env.salt), +env.iterations || 310000);
+    return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(env.iv) }, key, unb64(env.data))));
+  } catch { throw new Error('Wrong passphrase, or the file is damaged.'); }
+}
+
 // ---------- start ----------
 
 async function start() {
   await loadStore();
   loadState();
   initResizers();
+  applyReading();
+  initDesktop();
   await moveBodiesOut();
   applyTheme();
   wire();

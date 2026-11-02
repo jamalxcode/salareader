@@ -286,6 +286,45 @@ await step('accessibility: dark theme contrast', async () => {
   await page.emulateMedia({ colorScheme: 'light' });
 });
 
+await step('installable app: manifest, icons and offline worker', async () => {
+  await page.goto(SITE + '/?debug#/home'); await page.waitForSelector('.hero');
+  const m = await page.evaluate(async () => {
+    const man = await (await fetch('manifest.webmanifest')).json();
+    const icons = await Promise.all(man.icons.map(async (i) => (await fetch(i.src)).status));
+    const reg = await Promise.race([navigator.serviceWorker.ready.then(() => true), new Promise((r) => setTimeout(() => r(false), 15000))]);
+    return { name: man.name, icons, reg };
+  });
+  if (m.icons.some((s) => s !== 200)) throw new Error('icon missing: ' + m.icons.join(','));
+  if (!m.reg) throw new Error('the offline worker did not start');
+  await page.reload(); await page.waitForSelector('.hero');
+  const controlled = await page.evaluate(() => !!navigator.serviceWorker.controller);
+  if (!controlled) throw new Error('the offline worker does not control the page after a reload');
+  return `${m.name}, ${m.icons.length} icons, worker in control`;
+});
+
+await step('desktop: reading pane, right-click menu, Ctrl+K, text size', async () => {
+  await page.goto(SITE + '/?debug#/all'); await page.waitForSelector('article.entry');
+  await page.click('[data-act="pane"]'); await page.keyboard.press('j');
+  await page.waitForSelector('#reader h2');
+  const pane = await page.evaluate(() => document.body.classList.contains('pane') && document.querySelector('#reader').getBoundingClientRect().width);
+  if (!pane) throw new Error('the reading pane did not open');
+  await axe(page, 'reading pane');
+  await page.click('#list article.entry:nth-child(2) .row', { button: 'right' });
+  const items = await page.$$eval('#ctxMenu .ctx-item', (x) => x.length);
+  await page.keyboard.press('Escape');
+  if (items < 4) throw new Error(`right-click menu has ${items} items`);
+  await page.keyboard.press('Control+k'); await page.keyboard.type('starred'); await page.keyboard.press('Enter');
+  await page.waitForFunction(() => location.hash === '#/starred');
+  await page.goto(SITE + '/?debug#/all'); await page.waitForSelector('article.entry'); await page.keyboard.press('j');
+  await page.waitForSelector('#reader .content');
+  const before = await page.$eval('#reader .content', (e) => parseFloat(getComputedStyle(e).fontSize));
+  await page.keyboard.press('='); await page.waitForTimeout(100);
+  const after = await page.$eval('#reader .content', (e) => parseFloat(getComputedStyle(e).fontSize));
+  await page.keyboard.press('-'); await page.keyboard.press('1');
+  if (!(after > before)) throw new Error(`text size ${before} → ${after}`);
+  return `pane ${Math.round(pane)}px wide, menu ${items} items, text ${before} → ${after}px`;
+});
+
 if (pageErrors.length) fail('no page errors', pageErrors.slice(0, 5).join(' | '));
 else pass('no page errors');
 
