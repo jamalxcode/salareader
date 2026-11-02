@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "description": "Fetches the feeds in feeds.json and builds data/ for the Sala Reader site.",
+  "license": "MIT",
   "scripts": {
     "fetch": "node scripts/fetch.mjs"
   },
