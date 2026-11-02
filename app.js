@@ -2407,6 +2407,7 @@ function openInvestigation(id) {
   saveInvs();
   renderInv();
   renderSidebar();
+  setInvWidth(savedInvWidth(), false);
   $('#invPanel').focus();
   // Watching X: check for news there too, at most every 30 minutes.
   if (inv.follow?.x && grokKey() && Date.now() - (inv.xChecked || 0) > X_RECHECK_MS && !inv.busy) askInv(inv, '', 'updates');
@@ -2429,6 +2430,68 @@ function closeInvestigation() {
   document.body.classList.remove('inv-open');
   $('#invPanel').innerHTML = '';
   renderSidebar();
+}
+
+/* The separator between the articles and an investigation: drag it (or use
+   the arrow keys) to make the panel wider or narrower. The width is a
+   preference for this device only. Double-click puts it back. */
+const INV_W_KEY = 'salareader:invWidth';
+const INV_MIN = 280, MAIN_MIN = 460;
+function invMaxWidth() {
+  const nav = $('#sidebar');
+  const navW = nav && getComputedStyle(nav).position !== 'fixed' && nav.offsetParent ? nav.offsetWidth : 0;
+  return Math.max(INV_MIN, Math.min(window.innerWidth - navW - MAIN_MIN, window.innerWidth * 0.7));
+}
+function setInvWidth(w, save = true) {
+  const r = $('#invResizer');
+  if (w == null) {
+    document.documentElement.style.removeProperty('--inv-w');
+    if (save) try { localStorage.removeItem(INV_W_KEY); } catch {}
+  } else {
+    w = Math.round(Math.min(invMaxWidth(), Math.max(INV_MIN, w)));
+    document.documentElement.style.setProperty('--inv-w', w + 'px');
+    if (save) try { localStorage.setItem(INV_W_KEY, String(w)); } catch {}
+  }
+  const now = $('#invPanel')?.offsetWidth;
+  if (r && now) { r.setAttribute('aria-valuenow', String(now)); r.setAttribute('aria-valuemin', String(INV_MIN)); r.setAttribute('aria-valuemax', String(Math.round(invMaxWidth()))); }
+}
+function savedInvWidth() { try { const w = +localStorage.getItem(INV_W_KEY); return w > 0 ? w : null; } catch { return null; } }
+function initInvResizer() {
+  const r = $('#invResizer');
+  if (!r) return;
+  if (savedInvWidth()) setInvWidth(savedInvWidth(), false);
+  r.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    r.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startW = $('#invPanel').offsetWidth;
+    document.body.classList.add('inv-resizing');
+    let raf = 0, x = startX;
+    const move = (ev) => { x = ev.clientX; if (!raf) raf = requestAnimationFrame(() => { raf = 0; setInvWidth(startW + (startX - x), false); }); };
+    const up = () => {
+      r.removeEventListener('pointermove', move);
+      r.removeEventListener('pointerup', up);
+      r.removeEventListener('pointercancel', up);
+      cancelAnimationFrame(raf);
+      document.body.classList.remove('inv-resizing');
+      if (x !== startX) setInvWidth(startW + (startX - x));
+    };
+    r.addEventListener('pointermove', move);
+    r.addEventListener('pointerup', up);
+    r.addEventListener('pointercancel', up);
+  });
+  r.addEventListener('dblclick', () => setInvWidth(null));
+  r.addEventListener('keydown', (e) => {
+    const w = $('#invPanel').offsetWidth, step = e.shiftKey ? 80 : 24;
+    if (e.key === 'ArrowLeft') setInvWidth(w + step);
+    else if (e.key === 'ArrowRight') setInvWidth(w - step);
+    else if (e.key === 'Home') setInvWidth(invMaxWidth());
+    else if (e.key === 'End') setInvWidth(INV_MIN);
+    else return;
+    e.preventDefault(); e.stopPropagation();
+  });
+  // A smaller window shouldn't leave the panel crowding out the articles.
+  window.addEventListener('resize', () => { const w = savedInvWidth(); if (w) setInvWidth(w, false); });
 }
 
 /** Plain text answers with [n] article citations, links, bullets, headings and bold. */
@@ -3440,6 +3503,7 @@ async function refresh() {
 async function start() {
   await loadStore();
   loadState();
+  initInvResizer();
   await moveBodiesOut();
   applyTheme();
   wire();
