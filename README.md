@@ -270,4 +270,4 @@ Three workflows can be run by hand from the Actions tab:
 
 ## License
 
-[MIT](LICENSE) © 2026 jamalxcode. You may use, copy, change and share Sala Reader, including commercially, as long as the copyright and license notice stay with it. It comes with no warranty.
+[MIT](LICENSE) © 2026 Sala Company. You may use, copy, change and share Sala Reader, including commercially, as long as the copyright and license notice stay with it. It comes with no warranty.
