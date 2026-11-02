@@ -214,6 +214,21 @@ function loadState() {
     store.set('movesRetried', true);
     saveSubs();
   }
+  // News searches with OR got nothing from Bing before searches were split by term: fetch them again.
+  if (S.subs && !store.get('orRetried', false)) {
+    for (const sub of S.subs) if (/\s+OR\s+/.test(googleNewsQuery(sub.url) || bingNewsQuery(sub.url))) delete sub.ok;
+    store.set('orRetried', true);
+    saveSubs();
+  }
+  // Feeds already failing as gone (or for over a week) move to Retired feeds.
+  if (S.subs && !store.get('retiredOnce', false)) {
+    for (const sub of S.subs) {
+      if (!sub.own || !sub.error || sub.retired || sub.keep) continue;
+      if (/\b(404|410)\b|is gone|no public feed|No new address/i.test(sub.error) || (sub.failSince && Date.now() - sub.failSince > 7 * 864e5)) sub.retired = Date.now();
+    }
+    store.set('retiredOnce', true);
+    saveSubs();
+  }
   // Google News searches fetched before the Bing fallback existed: fetch them again now.
   if (S.subs && !store.get('gnRetried', false)) {
     for (const sub of S.subs) if (googleNewsQuery(sub.url) && !sub.via) delete sub.ok;
@@ -334,7 +349,11 @@ async function loadIndex(bust) {
 const catalogByUrl = () => new Map(S.index.feeds.map((f) => [f.url, f]));
 
 /** The folders a feed is in (like Google Reader and Feedly, a feed can be in several). */
+const RETIRED = '__retired';
+/** Folders are open unless closed; Retired feeds starts closed. */
+const folderClosed = (name) => (name === RETIRED ? S.collapsed[name] !== false : !!S.collapsed[name]);
 function feedFolders(f) {
+  if (f.retired) return [RETIRED];
   const list = [...new Set([f.folder || '', ...(f.folders || [])])];
   return list.length > 1 ? list.filter(Boolean) : list;
 }
@@ -727,6 +746,31 @@ function unwrapLink(link) {
   return link;
 }
 
+/** The search words of a Bing News search feed (a news search added from Subscribe), else ''. */
+function bingNewsQuery(url) {
+  try { const u = new URL(url); return /(^|\.)bing\.com$/.test(u.hostname) && u.pathname.startsWith('/news/search') ? u.searchParams.get('q') || '' : ''; } catch { return ''; }
+}
+
+/**
+ * Runs a news search. Bing's RSS returns nothing for "a OR b", so each OR
+ * term is searched on its own and the results merged (each article once).
+ */
+async function newsSearch(q, feed) {
+  const terms = q.split(/\s+OR\s+/).map((t) => t.trim()).filter(Boolean);
+  const parts = [];
+  let lastErr;
+  for (const term of terms) {
+    try {
+      const p = parseFeedXML(await fetchFeedTextRetry(newsSearchUrl(term)), feed.url, feed.id);
+      if (p) parts.push(p);
+    } catch (e) { lastErr = e; }
+  }
+  if (!parts.length) throw lastErr || new Error("The news search didn't answer.");
+  const seen = new Set();
+  const items = parts.flatMap((p) => p.items).filter((it) => { const k = articleKey(it); if (seen.has(k)) return false; seen.add(k); return true; });
+  return { title: parts[0].title, site: parts[0].site, items };
+}
+
 /** Bing News has RSS for any search, and unlike Google it answers the relay. */
 const newsSearchUrl = (q) => `https://www.bing.com/news/search?q=${encodeURIComponent(q)}&format=rss`;
 
@@ -796,36 +840,41 @@ async function fetchFeedTextRetry(url, opts) {
 async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   let via = '';
   let movedTo = '';
+  let parsed = null;
   const q = googleNewsQuery(feed.url);
+  const bq = bingNewsQuery(feed.url);
   // A feed found at a new address is read from there (its identity stays the same).
   const address = feed.fetchUrl || fetchAddress(feed.url);
+  // A news search with OR: one search per term, merged (Bing can't do OR).
+  if (xml == null && bq && /\s+OR\s+/.test(bq)) { parsed = await newsSearch(bq, feed); xml = ''; }
   if (xml == null) {
     try {
       xml = await fetchFeedTextRetry(address, { feed });
     } catch (e) {
       if (q) {
         // Google blocks relays: a Google News search comes from Bing News instead.
-        xml = await fetchFeedTextRetry(newsSearchUrl(q));
+        parsed = await newsSearch(q, feed);
+        xml = '';
         via = 'Bing News';
       } else if (e.gone && /(^|\.)youtube\.com$/.test(host(address))) {
-        throw new Error("YouTube has no public feed for this channel. It may have no public videos left, or be hidden or closed.");
+        throw Object.assign(new Error("YouTube has no public feed for this channel. It may have no public videos left, or be hidden or closed."), { permanent: true });
       } else if (e.gone || KNOWN_MOVES.some(([re]) => re.test(feed.url))) {
         movedTo = await findNewAddress(feed);
-        if (!movedTo) throw new Error(`${e.message} No new address could be found on the site.`);
+        if (!movedTo) throw Object.assign(new Error(`${e.message} No new address could be found on the site.`), { permanent: e.gone });
         xml = await fetchFeedText(movedTo);
       } else throw e;
     }
   }
-  let parsed = parseFeedXML(xml, feed.url, feed.id);
+  if (!parsed && xml) parsed = parseFeedXML(xml, feed.url, feed.id);
   // The address now shows a web page instead of the feed: look for where it went.
-  if (!parsed && !q && !movedTo) {
+  if (!parsed && !q && !bq && !movedTo) {
     movedTo = await findNewAddress(feed, xml);
     if (movedTo) parsed = parseFeedXML(await fetchFeedText(movedTo), feed.url, feed.id);
   }
   // Google sometimes answers with an empty list (or a page that isn't a feed): ask Bing too.
   if (q && !via && (!parsed || !parsed.items.length)) {
-    const bing = parseFeedXML(await fetchFeedTextRetry(newsSearchUrl(q)), feed.url, feed.id);
-    if (bing?.items.length) { parsed = { ...bing, title: parsed?.title || bing.title }; via = 'Bing News'; }
+    const bing = await newsSearch(q, feed);
+    if (bing.items.length) { parsed = { ...bing, title: parsed?.title || bing.title }; via = 'Bing News'; }
   }
   if (!parsed) throw new Error(movedTo === '' && !q ? "This address now shows a web page, not a feed, and no new address could be found on the site." : 'Not an RSS or Atom feed');
   const target = adding ? feed : liveSub(feed.url);
@@ -852,6 +901,7 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   target.site = parsed.site || target.site;
   if (!target.titleSet && parsed.title) target.title = parsed.title;
   target.ok = Date.now();
+  delete target.retired;
   target.every = fetchInterval(S.ownItems[target.id]);
   target.error = '';
   delete target.failSince;
@@ -868,6 +918,9 @@ function noteFeedError(feed, e) {
   target.error = e.message || 'Could not fetch';
   target.failSince ??= Date.now();
   target.lastTry = Date.now();
+  // Gone for good, or failing for over a week: retired (not fetched; you decide in Retired feeds).
+  // (Not a feed you chose to keep: that one stays, tried daily.)
+  if (!target.keep && (e.permanent || Date.now() - target.failSince > 7 * 864e5)) target.retired ??= Date.now();
   if ('direct' in feed) target.direct = feed.direct;
   saveSubs();
 }
@@ -931,7 +984,7 @@ function refreshOwnFeeds({ force = false, wait = false } = {}) {
     const catalog = catalogByUrl();
     const now = Date.now();
     const due = (S.subs || []).filter((s) => {
-      if (!s.own || catalog.has(s.url)) return false;
+      if (!s.own || catalog.has(s.url) || s.retired) return false;
       return force || now >= nextFetchAt(s);
     });
     if (!due.length || stopRefresh) return;
@@ -1215,7 +1268,7 @@ function viewTitle() {
     case 'all': return 'All items';
     case 'starred': return 'Starred';
     case 'feed': return S.feedById.get(v.id)?.title || 'Feed';
-    case 'folder': return v.id || 'Unfiled';
+    case 'folder': return v.id === RETIRED ? '📦 Retired feeds' : v.id || 'Unfiled';
     case 'topic': return '✨ ' + (S.topics.find((t) => t.id === v.id)?.name || 'Topic');
     case 'search': return `“${v.q}”`;
     default: return '';
@@ -1326,16 +1379,17 @@ function renderSidebar() {
     html += `<a class="nav-item${active('topic', t.id)}" href="#/topic/${t.id}"><span class="ico">✨</span><span class="name">${esc(t.name)}</span>${n}</a>`;
   }
   html += `<div class="nav-section"><span>Subscriptions</span></div>`;
-  const names = [...folders.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b));
+  const names = [...folders.keys()].sort((a, b) => (a === RETIRED) - (b === RETIRED) || (a === '') - (b === '') || a.localeCompare(b));
   for (const name of names) {
     const list = folders.get(name).sort((a, b) => a.title.localeCompare(b.title));
     const feedRow = (f) => `<a class="nav-item feed${active('feed', f.id)}${f.error ? ' broken' : ''}" href="#/feed/${f.id}" title="${esc(f.error ? `Couldn't fetch: ${f.error}` : f.url)}">
         ${avatar(f)}<span class="name">${esc(f.title)}</span>${f.error ? '<span class="warn" aria-label="Fetch problem">!</span>' : ''}${count(unreadByFeed.get(f.id) || 0)}</a>`;
     if (!name) { html += list.map(feedRow).join(''); continue; }
     const n = list.reduce((s, f) => s + (unreadByFeed.get(f.id) || 0), 0);
-    const closed = S.collapsed[name];
-    html += `<div class="folder${closed ? ' closed' : ''}">
-      <div class="nav-item folder-row${active('folder', name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">📁 ${esc(name)}</a>${count(n)}</div>
+    const closed = folderClosed(name);
+    const retired = name === RETIRED;
+    html += `<div class="folder${closed ? ' closed' : ''}${retired ? ' retired' : ''}">
+      <div class="nav-item folder-row${active('folder', name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(retired ? 'Retired feeds' : name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">${retired ? '📦 Retired feeds' : `📁 ${esc(name)}`}</a>${retired ? `<span class="count muted">${list.length}</span>` : count(n)}</div>
       <div class="folder-feeds">${list.map(feedRow).join('')}</div></div>`;
   }
   if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
@@ -1357,6 +1411,7 @@ function headerSub() {
   if (v.type === 'search') return v.status || `${all.length} results, best matches first`;
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);
+    if (f?.retired) return `📦 Retired (not fetched): ${f.error || 'failing for over a week'}`;
     if (f?.error) return `⚠ Couldn't fetch this feed${f.failSince ? ` (failing for ${agoText(f.failSince).replace(' ago', '')})` : ' last time'}: ${f.error}`;
     if (f?.fetchUrl && !f.error) return `${unread} unread · This feed moved; it's now read from ${host(f.fetchUrl)}.`;
     if (f?.via) return `${unread} unread · Google News can't be read through the relay, so this search comes from ${f.via}.`;
@@ -1383,7 +1438,8 @@ function renderHeader() {
       <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
-      ${feed?.own && feed.error ? `<button data-act="retry">⟳ Try again</button>` : ''}
+      ${v.type === 'folder' && v.id === RETIRED && S.feeds.some((f) => f.retired) ? `<button data-act="unsubretired" class="ghost danger">Delete all retired feeds</button>` : ''}
+      ${feed?.retired ? `<button data-act="keepfeed" data-id="${esc(feed.id)}">↻ Keep trying</button>` : feed?.own && feed.error ? `<button data-act="retry">⟳ Try again</button>` : ''}
       ${feed ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
     </div>
     <div class="brief" id="brief" hidden></div>`;
@@ -1512,7 +1568,8 @@ function renderHome() {
   const fresh = unread.filter((i) => i.i).slice(0, 6);
   const freshIds = new Set(fresh.map((i) => i.id));
   const latest = unread.filter((i) => !freshIds.has(i.id)).slice(0, 8);
-  const broken = S.feeds.filter((f) => f.error);
+  const broken = S.feeds.filter((f) => f.error && !f.retired);
+  const retiredCount = S.feeds.filter((f) => f.retired).length;
   const n = streak();
   const feedsWithUnread = new Set(unread.map((i) => i.f)).size;
   list.innerHTML = `
@@ -1539,6 +1596,7 @@ function renderHome() {
       <div class="chips">${S.topics.map((t) => `<a class="chip" href="#/topic/${t.id}">✨ ${esc(t.name)}${S.vectorsState !== 'loading' ? ` <b>${unreadOf(topicMatches(t).items)}</b>` : ''}</a>`).join('')}<button class="chip add" data-act="newtopic">＋ New topic</button></div>
       ${broken.length ? `<h2 class="home-h">Needs attention</h2><ul class="broken">${broken.map((f) => `<li><a href="#/feed/${f.id}">${esc(f.title)}</a>${f.failSince ? ` <span class="muted">(failing for ${esc(agoText(f.failSince).replace(' ago', ''))})</span>` : ''}: ${esc(f.error)}</li>`).join('')}</ul>
         ${broken.some((f) => f.own && f.failSince && Date.now() - f.failSince > 7 * 864e5) ? `<button data-act="unsubdead" class="ghost danger">Unsubscribe from feeds failing for over a week</button>` : ''}` : ''}
+      ${retiredCount ? `<p class="hint"><a href="#/folder/${RETIRED}">📦 ${retiredCount} retired feed${retiredCount === 1 ? '' : 's'}</a>: gone or failing for over a week, no longer fetched. Review them to keep trying or unsubscribe.</p>` : ''}
       ${store.get('deviceNoteDismissed', false) ? deviceNoteHTML(false) : ''}
     </section>`;
 }
@@ -1547,10 +1605,36 @@ function updateTitle() {
   document.title = S.view.type === 'home' ? `Sala Reader${S.unread ? ` (${S.unread})` : ''}` : `${viewTitle()} · Sala Reader`;
 }
 
+/** The Retired feeds page: each feed, why it was retired, and what you can do. */
+function renderRetired() {
+  const list = S.feeds.filter((f) => f.retired).sort((a, b) => a.title.localeCompare(b.title));
+  $('#list').innerHTML = list.length
+    ? `<p class="hint retired-intro">These feeds are gone, or have failed for over a week. They're no longer fetched. Keep trying the ones you want back; unsubscribe from the rest.</p>
+       <ul class="retired-list">${list.map((f) => `<li data-feed="${esc(f.id)}">
+         <div class="r-main">${avatar(f)}<a href="#/feed/${esc(f.id)}" class="r-title">${esc(f.title)}</a>
+           <span class="muted r-why">${esc(f.error || '')}</span><span class="muted r-addr">${esc(f.url)}</span></div>
+         <div class="r-actions"><button data-act="keepfeed" data-id="${esc(f.id)}">↻ Keep trying</button><button data-act="unsubone" data-id="${esc(f.id)}" class="ghost danger">Unsubscribe</button></div></li>`).join('')}</ul>`
+    : `<div class="empty"><p class="big">📦</p><p>No retired feeds.</p></div>`;
+}
+
+/** Brings a retired feed back: it returns to its folders and is fetched now. */
+function keepFeed(id) {
+  const sub = liveSub(S.feedById.get(id)?.url);
+  if (!sub) return;
+  delete sub.retired; delete sub.lastTry; delete sub.probedAt;
+  sub.keep = true; // you chose it: not retired again (tried daily while it fails)
+  saveSubs();
+  rebuild();
+  render();
+  toast(`Trying ${sub.title} again…`);
+  refreshOwnFeeds();
+}
+
 function render() {
   renderSidebar();
   renderHeader();
   if (S.view.type === 'home') renderHome();
+  else if (S.view.type === 'folder' && S.view.id === RETIRED) renderRetired();
   else renderList();
   updateTitle();
 }
@@ -1998,8 +2082,7 @@ function wire() {
     const tw = e.target.closest('.twisty');
     if (tw) {
       const name = tw.dataset.folder;
-      S.collapsed[name] = !S.collapsed[name];
-      if (!S.collapsed[name]) delete S.collapsed[name];
+      S.collapsed[name] = !folderClosed(name);
       store.set('collapsed', S.collapsed);
       renderSidebar();
       return;
@@ -2036,6 +2119,20 @@ function wire() {
           btn.disabled = true;
           btn.textContent = 'Trying…';
           fetchOwnFeed({ ...sub }).catch((err) => noteFeedError(sub, err)).finally(() => { rebuild(); render(); toast(sub.error ? sub.error : `✓ ${sub.title} works again`, 4000); });
+          return;
+        }
+        case 'keepfeed': keepFeed(btn.dataset.id); return;
+        case 'unsubone': {
+          const f = S.feedById.get(btn.dataset.id);
+          if (f && confirm(`Unsubscribe from ${f.title}?`)) { unsubscribe(f.id); render(); }
+          return;
+        }
+        case 'unsubretired': {
+          const gone = S.feeds.filter((f) => f.retired);
+          if (!gone.length || !confirm(`Unsubscribe from all ${gone.length} retired feed${gone.length === 1 ? '' : 's'}?`)) return;
+          for (const f of gone) unsubscribe(f.id);
+          render();
+          toast(`Unsubscribed from ${gone.length} retired feed${gone.length === 1 ? '' : 's'}`);
           return;
         }
         case 'unsubdead': {
