@@ -43,14 +43,15 @@ jobs:
           curl -s -D - -o /dev/null -H "$O" "$RELAY/?url=https://simonwillison.net/" | grep -i '^x-relay-kind' || { echo "FAIL missing X-Relay-Kind header (old relay code?)"; fail=1; }
           for u in $URLS; do
             enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$u")
-            d=$(curl -s -o /tmp/d -w '%{http_code} %{content_type} %{url_effective}' -L --max-time 30 -A 'SalaReader/1.0 (+https://reader.sala.company)' "$u")
-            r=$(curl -s -o /tmp/r -w '%{http_code}' --max-time 30 -H "$O" "$RELAY/?url=$enc")
+            : > /tmp/d; : > /tmp/r
+            d=$(curl -s -o /tmp/d -w '%{http_code} %{content_type} %{url_effective}' -L --max-time 30 -A 'SalaReader/1.0 (+https://reader.sala.company)' "$u" || echo "failed (curl $?)")
+            r=$(curl -s -o /tmp/r -w '%{http_code}' --max-time 30 -H "$O" "$RELAY/?url=$enc" || echo "failed (curl $?)")
             echo "URL    $u"
             echo "  direct: $d :: $(head -c 120 /tmp/d | tr '\n' ' ')"
             echo "  relay:  $r :: $(head -c 160 /tmp/r | tr '\n' ' ')"
             # How the first items identify themselves (guid / link), twice, to spot ids that change.
             for k in 1 2; do
-              curl -s -L --max-time 30 -A "SalaReader/1.0 (+https://reader.sala.company)" "$u" > /tmp/r$k; sleep 2
+              curl -s -L --max-time 30 -A "SalaReader/1.0 (+https://reader.sala.company)" "$u" > /tmp/r$k || true; sleep 2
               echo "  ids (direct $k): $(grep -o '<guid[^>]*>[^<]*</guid>\|<link>[^<]*</link>\|<id>[^<]*</id>' /tmp/r$k | sed -n '2,5p' | tr '\n' ' ' | head -c 400)"
             done
           done
