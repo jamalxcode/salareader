@@ -39,11 +39,13 @@ async function run() {
     const job = jobs[0];
     try {
       const ex = await load(job.model);
-      const batch = job.texts.slice(job.done, job.done + 16);
-      const t = await ex(batch, { pooling: 'mean', normalize: true });
+      // Texts of similar length go together: a batch is padded to its longest text.
+      job.order ??= job.texts.map((_, i) => i).sort((a, b) => job.texts[a].length - job.texts[b].length);
+      const idx = job.order.slice(job.done, job.done + 16);
+      const t = await ex(idx.map((i) => job.texts[i]), { pooling: 'mean', normalize: true });
       const dim = t.dims[t.dims.length - 1];
-      for (let b = 0; b < batch.length; b++) job.out.push(Float32Array.from(t.data.slice(b * dim, (b + 1) * dim)));
-      job.done += batch.length;
+      idx.forEach((i, b) => { job.out[i] = Float32Array.from(t.data.slice(b * dim, (b + 1) * dim)); });
+      job.done += idx.length;
       if (job.done < job.texts.length) { postMessage({ type: 'progress', id: job.id, done: job.done, total: job.texts.length }); continue; }
       jobs.shift();
       postMessage({ type: 'done', id: job.id, vecs: job.out }, job.out.map((v) => v.buffer));

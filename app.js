@@ -581,25 +581,43 @@ async function loadVectors() {
  */
 let topicVectorsRunning = false;
 async function vectorsForTopics() {
-  if (!S.topics.length || topicVectorsRunning) return;
+  // Also once you've used AI search: then new articles are ready before you search.
+  if ((!S.topics.length && !S.settings.aiUsed) || topicVectorsRunning) return;
   await loadVectors();
   const missing = S.items.filter((i) => S.feedById.get(i.f)?.own && !S.vectors.has(i.id));
   if (!missing.length) return;
   topicVectorsRunning = true;
   try {
-    await ensureVectors(missing);
-    renderSidebar();
-    if (S.view.type === 'home') refreshHome();
-    else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); }
+    // In steps (newest first), each kept on the device as it's done.
+    for (let k = 0; k < missing.length; k += 1500) {
+      await ensureVectors(missing.slice(k, k + 1500));
+      if (S.topics.length) {
+        renderSidebar();
+        if (S.view.type === 'home') refreshHome();
+        else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); }
+      }
+    }
   } catch (e) { console.warn('Topic vectors', e); } finally { topicVectorsRunning = false; }
 }
 
 /** Makes sure every item has a vector, embedding in the browser where needed. */
+const vecInFlight = new Map(); // article id -> promise, so two callers never work out the same article
 async function ensureVectors(items, onProgress, onEmbedded) {
   await loadVectors();
-  const todo = items.filter((i) => !S.vectors.has(i.id));
-  if (!todo.length) return;
-  const vecs = await embed(todo.map(embedText), onProgress, onEmbedded);
+  const others = new Set();
+  const todo = items.filter((i) => {
+    if (S.vectors.has(i.id)) return false;
+    if (vecInFlight.has(i.id)) { others.add(vecInFlight.get(i.id)); return false; }
+    return true;
+  });
+  if (!todo.length) { await Promise.allSettled(others); return; }
+  const key = modelKey();
+  const job = embed(todo.map(embedText), onProgress, onEmbedded);
+  for (const it of todo) vecInFlight.set(it.id, job);
+  let vecs;
+  try { vecs = await job; } finally { for (const it of todo) vecInFlight.delete(it.id); }
+  await Promise.allSettled(others);
+  if (key !== modelKey()) return; // the model was switched meanwhile
   todo.forEach((it, k) => S.vectors.set(it.id, vecs[k]));
   S.version++;
   // Keep your own feeds' vectors on the device, one record per feed, so they're worked out only once.
@@ -1573,14 +1591,16 @@ async function runSearch(q) {
     const ranked = [];
     for (const it of S.items) {
       const vec = S.vectors.get(it.id);
-      let s = vec ? dot(qv, vec) : 0;
-      if (keyword(it)) s += 0.2;
+      const kw = keyword(it);
+      // Word matches not worked out yet still count (as a good match).
+      let s = vec ? dot(qv, vec) + (kw ? 0.2 : 0) : kw ? 0.6 : 0;
       if (s >= 0.3) { scores[it.id] = s; ranked.push(it); }
     }
     ranked.sort((a, b) => scores[b.id] - scores[a.id]);
     return { results: ranked.slice(0, 150), scores };
   };
   let qv;
+  if (!S.settings.aiUsed) { S.settings.aiUsed = true; saveSettings(); }
   try {
     await loadVectors();
     [qv] = await embed([q], (p) => { if (S.view === v) { v.status = `Downloading the AI model (first time only)… ${Math.round(p * 100)}%`; renderHeaderCounts(); } });
@@ -1594,30 +1614,37 @@ async function runSearch(q) {
     render();
     return;
   }
+  // Newest first, in steps, so recent matches show up early.
   const missing = S.items.filter((i) => !S.vectors.has(i.id) && S.feedById.get(i.f)?.own);
   if (missing.length) v.status = `Best matches first · checking ${missing.length} more articles from your feeds…`;
   render();
   if (!missing.length) return;
-  try {
-    await ensureVectors(missing, null, (done, total) => {
-      if (S.view === v) { v.status = `Best matches first · checking your feeds' articles… ${Math.round((done / total) * 100)}%`; renderHeaderCounts(); }
-    });
-  } catch (e) { console.warn(e); }
-  if (S.view !== v) return;
-  const next = rank(qv);
-  v.status = '';
-  const added = next.results.filter((it) => !v.scores?.[it.id]).length;
-  // Don't reshuffle the list under an article you're reading: offer the new matches instead.
-  if (S.cur >= 0 && added) {
-    v.pending = next;
-    v.status = `${added} more matches found in your feeds`;
-    renderHeaderCounts();
-    const sub = $('#viewHeader .sub');
-    if (sub) sub.insertAdjacentHTML('beforeend', ' · <button class="linkish" data-act="showpending">Show them</button>');
-    return;
+  const STEP = 1500;
+  for (let start = 0; start < missing.length; start += STEP) {
+    try {
+      await ensureVectors(missing.slice(start, start + STEP), null, (done) => {
+        if (S.view === v && !v.pending) { v.status = `Best matches first · checking your feeds' articles… ${Math.round(((start + done) / missing.length) * 100)}%`; renderHeaderCounts(); }
+      });
+    } catch (e) { console.warn(e); break; }
+    if (S.view !== v) return;
+    const next = rank(qv);
+    const added = next.results.filter((it) => !v.scores?.[it.id]).length;
+    const last = start + STEP >= missing.length;
+    if (!added) { if (last) { v.status = ''; renderHeaderCounts(); } continue; }
+    // Don't reshuffle the list under an article you're reading: offer the new matches instead.
+    if (S.cur >= 0) {
+      v.pending = next;
+      v.status = `${added} more matches found in your feeds${last ? '' : ' (still checking)'}`;
+      renderHeaderCounts();
+      const sub = $('#viewHeader .sub');
+      if (sub) sub.insertAdjacentHTML('beforeend', ' · <button class="linkish" data-act="showpending">Show them</button>');
+      continue;
+    }
+    Object.assign(v, next);
+    if (last) v.status = '';
+    render();
   }
-  Object.assign(v, next);
-  if (S.view === v) render();
+  if (S.view === v && !v.pending) { v.status = ''; renderHeaderCounts(); }
 }
 
 // ---------- rendering ----------
@@ -2570,7 +2597,7 @@ function wire() {
         case 'newtopic': openTopic(); return;
         case 'more': renderList(false); return;
         case 'savetopic': openTopic(S.view.q); return;
-        case 'showpending': if (S.view.pending) { Object.assign(S.view, S.view.pending); delete S.view.pending; S.view.status = ''; render(); } return;
+        case 'showpending': if (S.view.pending) { Object.assign(S.view, S.view.pending); delete S.view.pending; S.view.status = /still checking/.test(S.view.status) ? 'Best matches first · still checking your feeds…' : ''; render(); } return;
         case 'deltopic':
           if (confirm('Delete this topic?')) { S.topics = S.topics.filter((t) => t.id !== S.view.id); store.set('topics', S.topics); go('#/home'); }
           return;
