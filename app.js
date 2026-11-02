@@ -830,10 +830,14 @@ function dedupeArticles(items) {
 async function fetchFeedTextRetry(url, opts) {
   const text = await fetchFeedText(url, opts);
   if (parseFeedXML(text, url, 'x') || !/bing\.com\/news/.test(url)) return text;
-  await sleep(2500);
-  // A different address skips anything the relay kept from the bad answer.
-  const again = await fetchFeedText(`${url}&_=${Date.now() % 100000}`, opts);
-  if (parseFeedXML(again, url, 'x')) return again;
+  // Bing now and then answers the relay with a "are you a robot" page instead of
+  // the feed, at random per request. A few more tries, a moment apart, each
+  // slightly different (settings Bing ignores for the results).
+  for (const extra of ['&mkt=en-US', '&setlang=en-US', '&cc=US', `&_=${Date.now() % 100000}`]) {
+    await sleep(2000);
+    const again = await fetchFeedText(url + extra, opts).catch(() => '');
+    if (parseFeedXML(again, url, 'x')) return again;
+  }
   throw new Error("The news search didn't answer with results just now. It will be tried again.");
 }
 
