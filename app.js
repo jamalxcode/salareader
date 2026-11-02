@@ -208,6 +208,7 @@ const S = {
   feeds: [],            // your subscriptions (catalog + your own)
   feedById: new Map(),
   items: [],            // their items, newest first
+  uniq: [],             // the same, each story once (copies in other feeds left out)
   byId: new Map(),
   content: null,        // Promise<{itemId: html}> for the catalog
   vectors: new Map(),   // itemId -> Float32Array
@@ -465,15 +466,48 @@ function rebuild() {
     .filter((i) => { if (seenIds.has(i.id)) return false; seenIds.add(i.id); return true; })
     .sort((a, b) => b.d - a.d);
   S.byId = new Map(S.items.map((i) => [i.id, i]));
+  findTwins();
   // Forget read marks for items that are long gone.
   const cutoff = Date.now() - 90 * 864e5;
   let changed = false;
   for (const [id, t] of Object.entries(S.read)) if (t < cutoff && !S.byId.has(id)) { delete S.read[id]; changed = true; }
   if (changed) store.set('read', S.read);
-  S.unread = unreadOf(S.items);
+  S.unread = unreadOf(S.uniq);
   buildSmart();
   S.version++;
 }
+
+// ---------- the same story in several feeds ----------
+// Sites often publish one article in several of their feeds (Paris-Match's
+// main, People and News feeds). Each feed still lists its copy, but views that
+// mix feeds (All items, folders, smart folders, topics, search, Home) show it
+// once, and reading one copy reads them all.
+
+/** Groups copies by link and title; S.uniq is every article once (the newest copy). */
+function findTwins() {
+  const groups = new Map();
+  for (const it of S.items) {
+    const lk = linkKey(it);
+    if (!lk) continue;
+    const k = `${lk}|${(it.t || '').trim().toLowerCase()}`;
+    const g = groups.get(k);
+    if (g) g.push(it.id); else groups.set(k, [it.id]);
+  }
+  S.twinsOf = new Map();
+  S.dupHidden = new Set();
+  let changed = false;
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    for (const id of g) S.twinsOf.set(id, g);
+    for (const id of g.slice(1)) S.dupHidden.add(id);
+    // Read in one feed = read in all.
+    const readAt = g.map((id) => S.read[id]).find(Boolean);
+    if (readAt) for (const id of g) if (!(id in S.read)) { S.read[id] = readAt; changed = true; }
+  }
+  if (changed) store.set('read', S.read);
+  S.uniq = S.dupHidden.size ? S.items.filter((i) => !S.dupHidden.has(i.id)) : S.items;
+}
+const twinsOf = (id) => S.twinsOf?.get(id) || [id];
 
 // ---------- smart folders ----------
 
@@ -485,7 +519,7 @@ function rebuild() {
 let smartRun = 0;
 function buildSmart() {
   const run = ++smartRun;
-  const items = S.items;
+  const items = S.uniq;
   (async () => {
     const smart = new Map();
     const metaOf = new Map();
@@ -1351,10 +1385,15 @@ function scheduleCounts() {
 
 function markRead(id, read = true) {
   const was = isRead(id);
-  if (read) { if (!was) S.read[id] = Date.now(); } else delete S.read[id];
   if (was === read) return;
-  // The running unread total changes only for articles in your current feeds.
-  if (S.byId.has(id)) S.unread += read ? -1 : 1;
+  // Every copy of the story (the same article in other feeds) goes with it.
+  for (const x of twinsOf(id)) {
+    if (isRead(x) === read) continue;
+    if (read) S.read[x] = Date.now(); else delete S.read[x];
+    // The running unread total counts each story once, in your current feeds.
+    if (S.byId.has(x) && !S.dupHidden?.has(x)) S.unread += read ? -1 : 1;
+    if (x !== id) updateEntryDom(x);
+  }
   store.set('read', S.read);
   if (read) noteActivity();
   updateEntryDom(id);
@@ -1366,9 +1405,9 @@ function markAllRead(items) {
   const before = totalUnread();
   const t = Date.now();
   let n = 0;
-  for (const it of items) if (!isRead(it.id)) { S.read[it.id] = t; n++; }
+  for (const it of items) if (!isRead(it.id)) { for (const x of twinsOf(it.id)) S.read[x] ??= t; n++; }
   store.set('read', S.read);
-  S.unread = unreadOf(S.items);
+  S.unread = unreadOf(S.uniq);
   if (n) noteActivity();
   render();
   if (n) toast(`Marked ${n} as read`);
@@ -1451,7 +1490,7 @@ function computeTopic(topic) {
   const qv = topicVec(topic);
   const out = [];
   const scores = {};
-  for (const it of S.items) {
+  for (const it of S.uniq) {
     const hay = `${it.t} ${it.s}`.toLowerCase();
     let score = 0;
     const v = S.vectors.get(it.id);
@@ -1502,6 +1541,8 @@ function viewItems() {
     case 'smart': items = S.smart?.get(v.id) || []; break;
     default: items = [];
   }
+  // Views that mix feeds show each story once.
+  if (S.dupHidden?.size && !['feed', 'starred'].includes(v.type)) items = items.filter((i) => !S.dupHidden.has(i.id));
   // Smart folders show only unread articles (and ones opened while you're there).
   const showAll = v.type === 'starred' || v.type === 'search' || (v.type !== 'smart' && !S.settings.unreadOnly);
   const shown = showAll ? items : items.filter((i) => !isRead(i.id) || v.keep?.has(i.id));
@@ -1582,7 +1623,7 @@ async function runSearch(q) {
   const wordTests = words.map(wordRe);
   const keyword = (it) => { const hay = `${it.t} ${it.s} ${S.feedById.get(it.f)?.title || ''}`; return wordTests.every((w) => w.test(hay)); };
   // 1) Instant keyword results.
-  v.results = S.items.filter(keyword).slice(0, 200);
+  v.results = S.uniq.filter(keyword).slice(0, 200);
   v.scores = null;
   v.status = 'Finding articles by meaning…';
   render();
@@ -1592,7 +1633,7 @@ async function runSearch(q) {
   const rank = (qv) => {
     const scores = {};
     const ranked = [];
-    for (const it of S.items) {
+    for (const it of S.uniq) {
       const vec = S.vectors.get(it.id);
       const kw = keyword(it);
       // Word matches not worked out yet still count (as a good match).
@@ -1660,7 +1701,11 @@ function renderSidebar() {
     }
   }
   const unreadByFeed = new Map();
-  for (const it of S.items) if (!isRead(it.id)) unreadByFeed.set(it.f, (unreadByFeed.get(it.f) || 0) + 1);
+  const uniqByFeed = new Map(); // for folder totals: a story in two of a folder's feeds counts once
+  for (const it of S.items) if (!isRead(it.id)) {
+    unreadByFeed.set(it.f, (unreadByFeed.get(it.f) || 0) + 1);
+    if (!S.dupHidden?.has(it.id)) uniqByFeed.set(it.f, (uniqByFeed.get(it.f) || 0) + 1);
+  }
   const v = S.view;
   const active = (type, id) => (v.type === type && (id === undefined || v.id === id) ? ' active' : '');
   const count = (n) => (n ? `<span class="count">${n > 999 ? '999+' : n}</span>` : '');
@@ -1688,7 +1733,7 @@ function renderSidebar() {
     const feedRow = (f) => `<a class="nav-item feed${active('feed', f.id)}${f.error ? ' broken' : ''}" href="#/feed/${f.id}" draggable="true" data-feed="${esc(f.id)}" data-from="${esc(name)}" title="${esc(f.error ? `Couldn't fetch: ${f.error}` : f.url)}">
         ${avatar(f)}<span class="name">${esc(f.title)}</span>${f.error ? '<span class="warn" aria-label="Fetch problem">!</span>' : ''}${count(unreadByFeed.get(f.id) || 0)}</a>`;
     if (!name) { html += list.map(feedRow).join(''); continue; }
-    const n = list.reduce((s, f) => s + (unreadByFeed.get(f.id) || 0), 0);
+    const n = list.reduce((s, f) => s + (uniqByFeed.get(f.id) || 0), 0);
     const closed = folderClosed(name);
     const retired = name === RETIRED;
     html += `<div class="folder${closed ? ' closed' : ''}${retired ? ' retired' : ''}">
@@ -1913,7 +1958,7 @@ function greeting() {
 
 function renderHome() {
   const list = $('#list');
-  const unread = S.items.filter((i) => !isRead(i.id));
+  const unread = S.uniq.filter((i) => !isRead(i.id));
   const fresh = unread.filter((i) => i.i).slice(0, 6);
   const freshIds = new Set(fresh.map((i) => i.id));
   const latest = unread.filter((i) => !freshIds.has(i.id)).slice(0, 8);
@@ -2156,8 +2201,8 @@ const moreObserver = new IntersectionObserver((list) => {
 }, { rootMargin: '600px' });
 
 function surprise() {
-  const pool = S.items.filter((i) => !isRead(i.id));
-  const pick = (pool.length ? pool : S.items)[Math.floor(Math.random() * (pool.length || S.items.length))];
+  const pool = S.uniq.filter((i) => !isRead(i.id));
+  const pick = (pool.length ? pool : S.uniq)[Math.floor(Math.random() * (pool.length || S.uniq.length))];
   if (!pick) { toast('Nothing to surprise you with yet'); return; }
   openItemAnywhere(pick.id);
 }
@@ -2256,7 +2301,7 @@ async function related(article) {
   try {
     await ensureVectors([it, ...S.items.filter((i) => i.f.startsWith('L'))], (p) => { box.innerHTML = `<p class="loading">Downloading the AI model (first time only)… ${Math.round(p * 100)}%</p>`; });
     const v = S.vectors.get(it.id);
-    const scored = S.items.filter((o) => o.id !== it.id && S.vectors.has(o.id)).map((o) => [o, dot(v, S.vectors.get(o.id))]).filter(([, s]) => s > 0.45).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const scored = S.uniq.filter((o) => !twinsOf(it.id).includes(o.id) && S.vectors.has(o.id)).map((o) => [o, dot(v, S.vectors.get(o.id))]).filter(([, s]) => s > 0.45).sort((a, b) => b[1] - a[1]).slice(0, 6);
     if (!scored.length) { box.innerHTML = '<p>No similar articles in your feeds right now.</p>'; return; }
     box.innerHTML = `<h3>More like this</h3><ul>${scored.map(([o, s]) => `<li><a href="#" data-open="${esc(o.id)}">${esc(o.t)}</a> <span class="muted">${esc(S.feedById.get(o.f)?.title || '')} · ${ago(o.d)}${s > 0.8 && o.f !== it.f ? ' · same story' : ''}</span></li>`).join('')}</ul>`;
   } catch (e) {
@@ -2306,7 +2351,7 @@ function invPool(inv) {
   const phrase = wordRe(inv.query.trim());
   const words = inv.query.trim().split(/\s+/).filter((w) => w.length > 2).map(wordRe);
   const scored = [];
-  for (const it of S.items) {
+  for (const it of S.uniq) {
     const hay = `${it.t} ${it.s}`;
     let score = 0;
     const v = qv && S.vectors.get(it.id);
