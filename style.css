@@ -621,3 +621,15 @@ body.inv-open .inv-panel, .inv-ask { background: var(--side); }
 .ai-out, .brief, .related { background: var(--side); border: 1px solid var(--border); border-radius: var(--radius); }
 .related { padding: 12px 16px; }
 .ai-out .via, .brief .via { color: var(--text-2); }
+
+/* The sidebar is lightly shaded, so it stands apart from the articles in the middle. */
+:root { --nav-bg: #f4f6f9; --nav-hover: #e7ecf4; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="classic"]):not([data-theme="paper"]) { --nav-bg: #1d1f23; --nav-hover: #2a2d33; }
+}
+:root[data-theme="dark"] { --nav-bg: #1d1f23; --nav-hover: #2a2d33; }
+:root[data-theme="paper"] { --nav-bg: #f3ecdf; --nav-hover: #ebe1cd; }
+:root[data-theme="classic"] { --nav-bg: var(--bg-2); --nav-hover: var(--bg-hover); }
+#sidebar { background: var(--nav-bg); border-right: 1px solid var(--border); }
+#sidebar .nav-item:hover:not(.active) { background: var(--nav-hover); }
+#sidebar .add-btn { background: var(--bg); }
