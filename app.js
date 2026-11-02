@@ -1763,8 +1763,10 @@ async function runSearch(q) {
     await loadVectors();
     [qv] = await embed([q], (p) => { if (S.view === v) { v.status = `Downloading the AI model (first time only)… ${Math.round(p * 100)}%`; renderHeaderCounts(); } });
     if (S.view !== v) return;
-    Object.assign(v, rank(qv));
-    v.status = S.vectors.size ? '' : 'AI search needs the next feed update to finish its first run; showing word matches.';
+    const ranked = rank(qv);
+    // You opened a word match while the AI was starting: keep it open and offer the AI's order.
+    if (S.cur >= 0) v.pending = ranked; else Object.assign(v, ranked);
+    v.status = S.vectors.size ? (v.pending ? 'Best matches by meaning are ready' : '') : 'AI search needs the next feed update to finish its first run; showing word matches.';
   } catch (e) {
     console.warn(e);
     if (S.view !== v) return;
@@ -1775,7 +1777,7 @@ async function runSearch(q) {
   // Newest first, in steps, so recent matches show up early.
   const missing = S.items.filter((i) => !S.vectors.has(i.id) && S.feedById.get(i.f)?.own);
   if (missing.length) v.status = `Best matches first · checking ${missing.length} more articles from your feeds…`;
-  render();
+  if (v.pending) renderHeaderCounts(); else render();
   if (!missing.length) return;
   const STEP = 1500;
   for (let start = 0; start < missing.length; start += STEP) {
@@ -1786,7 +1788,7 @@ async function runSearch(q) {
     } catch (e) { console.warn(e); break; }
     if (S.view !== v) return;
     const next = rank(qv);
-    const added = next.results.filter((it) => !v.scores?.[it.id]).length;
+    const added = next.results.filter((it) => !(v.pending || v).scores?.[it.id]).length;
     const last = start + STEP >= missing.length;
     if (!added) { if (last) { v.status = ''; renderHeaderCounts(); } continue; }
     // Don't reshuffle the list under an article you're reading: offer the new matches instead.

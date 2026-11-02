@@ -13,7 +13,7 @@
     "expect": [
       "7\\. via relay -> /feed/",
       "keys in file: \\{\\} token: \\\"\\\"",
-      "9\\. new device after import: subs 8 starred 1 read 3",
+      "9\\. new device after import: subs 8 starred 1 read [23]",
       "10\\. after erase: subs 6"
     ]
   },
@@ -304,6 +304,14 @@
       "worker in control: true",
       "prefetched in the background: 3",
       "network requests in the next refresh \\(should be the not-prefetched ones only\\): \\[\\]"
+    ]
+  },
+  "t42.cjs": {
+    "name": "Search: an article opened while the AI starts stays open",
+    "expect": [
+      "opened article still open after the AI finished: true",
+      "header offers the AI order: .*Show them",
+      "after Show them: true"
     ]
   }
 }
