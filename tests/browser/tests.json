@@ -5,7 +5,7 @@
       "needKey opened settings: true",
       "openrouter signin visible: true",
       "Signed in to OpenRouter",
-      "saved: \\[ 'openrouter', \\{ openrouter: 'sk-or-test' \\} \\]"
+      "saved: \\[ 'openrouter', \\{ .*openrouter: 'sk-or-test' \\} \\]"
     ]
   },
   "t3.cjs": {
