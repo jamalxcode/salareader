@@ -194,6 +194,19 @@ for (const [id, model] of providers) {
   else info(`AI ${id}: NOT reachable from the browser`, r.slice(0, 160));
 }
 
+// Grok's live X/web search (the Responses API) from the browser, with a fake key.
+{
+  const r = await page.evaluate(async () => {
+    try {
+      const ai = await import('/ai.js');
+      await ai.askGrokLive({ apiKey: 'xai-fake-key-for-testing-0000000000', system: 'Say hi.', messages: [{ role: 'user', content: 'Hi' }] });
+      return 'answered (unexpected)';
+    } catch (e) { return String(e.message || e); }
+  });
+  if (/didn't accept|rejected|API error 4|out of credit|isn't available|rate limit|couldn't handle/i.test(r)) pass('AI xai live search (X/web): reachable from the browser', r.slice(0, 120));
+  else fail('AI xai live search (X/web): NOT reachable from the browser', r.slice(0, 200));
+}
+
 // ---------- phone ----------
 const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 phone.on('pageerror', (e) => pageErrors.push('phone: ' + e.message));
