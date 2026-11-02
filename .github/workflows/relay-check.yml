@@ -41,6 +41,22 @@ jobs:
           check "no origin is refused"            403 "$RELAY/?url=https://xkcd.com/atom.xml"
           check "old address still allowed"       200 -H "Origin: https://salareader.sala.company" "$RELAY/?url=https://xkcd.com/atom.xml"
           curl -s -D - -o /dev/null -H "$O" "$RELAY/?url=https://simonwillison.net/" | grep -i '^x-relay-kind' || { echo "FAIL missing X-Relay-Kind header (old relay code?)"; fail=1; }
+          # Sites that turn away readers that don't look like a browser: the relay
+          # tries those once more with a browser-style agent (relay code from 2 Nov 2026).
+          B='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 SalaReader/1.0'
+          G='SalaReader/1.0 (+https://reader.sala.company)'
+          rescued=0
+          for u in https://www.reddit.com/r/news/.rss https://medium.com/feed/@medium https://www.zerohedge.com/fullrss2.xml https://www.investing.com/rss/news.rss https://seekingalpha.com/feed.xml https://www.forbes.com/real-time/feed2/ https://www.economist.com/latest/rss.xml https://www.ft.com/rss/home https://feeds.bloomberg.com/markets/news.rss https://www.wsj.com/xml/rss/3_7085.xml https://www.theverge.com/rss/index.xml https://stackoverflow.blog/feed/; do
+            enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$u")
+            g=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 -A "$G" "$u" || echo ERR)
+            b=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 -A "$B" "$u" || echo ERR)
+            r=$(curl -s -o /tmp/r -w '%{http_code}' --max-time 30 -H "$O" "$RELAY/?url=$enc" || echo ERR)
+            kind=$(grep -c '<item\|<entry' /tmp/r || true)
+            note=''
+            if [ "$g" != 200 ] && [ "$b" = 200 ] && [ "$r" = 200 ]; then note='  <- refuses the plain agent, read through the relay'; rescued=$((rescued+1)); fi
+            printf 'AGENT %-48s plain %s, browser %s, relay %s (%s items)%s\n' "$u" "$g" "$b" "$r" "$kind" "$note"
+          done
+          echo "INFO feeds that refuse a plain agent but were read through the relay: $rescued"
           for u in $URLS; do
             enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$u")
             : > /tmp/d; : > /tmp/r
