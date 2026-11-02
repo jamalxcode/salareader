@@ -671,6 +671,7 @@ const KNOWN_MOVES = [
   [/^https?:\/\/(www\.)?tasnimnews\.com\/en\//i, 'https://www.tasnimnews.ir/en/rss/feed/0/0/0/0/AllStories'],
   [/^https?:\/\/(www\.)?panarmenian\.net\/(stickers\/news\/news_eng|eng\/)/i, 'https://www.pan.am/en/newsfeed/rss'],
   [/^https?:\/\/english\.aljazeera\.net\//i, 'https://www.aljazeera.com/xml/rss/all.xml'],
+  [/^https?:\/\/feeds\.feedburner\.com\/BitcoinMagazine\b/i, 'https://bitcoinmagazine.com/feed'],
 ];
 
 /**
@@ -806,6 +807,8 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
         // Google blocks relays: a Google News search comes from Bing News instead.
         xml = await fetchFeedTextRetry(newsSearchUrl(q));
         via = 'Bing News';
+      } else if (e.gone && /(^|\.)youtube\.com$/.test(host(address))) {
+        throw new Error("YouTube has no public feed for this channel. It may have no public videos left, or be hidden or closed.");
       } else if (e.gone || KNOWN_MOVES.some(([re]) => re.test(feed.url))) {
         movedTo = await findNewAddress(feed);
         if (!movedTo) throw new Error(`${e.message} No new address could be found on the site.`);
@@ -1916,7 +1919,15 @@ async function importOPML(file) {
   for (const f of byUrl.values()) {
     const existing = S.subs.find((s) => s.url === f.url);
     // A feed you already have joins any folders it's in in the file.
-    if (existing) { if (addFolders(existing, f.folders)) foldersAdded++; if (!existing.site && f.site) existing.site = f.site; continue; }
+    if (existing) {
+      if (addFolders(existing, f.folders)) foldersAdded++;
+      if (!existing.site && f.site) {
+        existing.site = f.site;
+        // With its website known, a broken feed can be looked for there: try now.
+        if (existing.error) { delete existing.lastTry; delete existing.probedAt; }
+      }
+      continue;
+    }
     const c = catalog.get(f.url);
     const [folder, ...more] = f.folders;
     const sub = c ? { id: c.id, url: c.url, title: c.title, folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder, own: true, site: f.site || '' };
