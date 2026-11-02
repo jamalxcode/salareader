@@ -1,0 +1,93 @@
+{
+  "note": "Popular feeds shown under Discover in Subscribe. Checked with the 'Check the feed directory' workflow.",
+  "categories": [
+    { "name": "Tech", "feeds": [
+      { "title": "The Verge", "url": "https://www.theverge.com/rss/index.xml", "tags": "tech gadgets apps" },
+      { "title": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index", "tags": "tech science policy" },
+      { "title": "Wired", "url": "https://www.wired.com/feed/rss", "tags": "tech culture science" },
+      { "title": "TechCrunch", "url": "https://techcrunch.com/feed/", "tags": "startups funding tech" },
+      { "title": "Engadget", "url": "https://www.engadget.com/rss.xml", "tags": "gadgets tech" },
+      { "title": "MIT Technology Review", "url": "https://www.technologyreview.com/feed/", "tags": "tech ai science" },
+      { "title": "Hacker News: Best", "url": "https://hnrss.org/best", "tags": "tech programming startups" },
+      { "title": "The Register", "url": "https://www.theregister.com/headlines.atom", "tags": "tech enterprise security" },
+      { "title": "Tom's Hardware", "url": "https://www.tomshardware.com/feeds/all", "tags": "hardware pc chips" },
+      { "title": "9to5Mac", "url": "https://9to5mac.com/feed/", "tags": "apple iphone mac" },
+      { "title": "Six Colors", "url": "https://sixcolors.com/feed/", "tags": "apple mac" },
+      { "title": "Daring Fireball", "url": "https://daringfireball.net/feeds/main", "tags": "apple tech" },
+      { "title": "Android Police", "url": "https://www.androidpolice.com/feed/", "tags": "android google phones" }
+    ]},
+    { "name": "AI", "feeds": [
+      { "title": "Simon Willison", "url": "https://simonwillison.net/atom/everything/", "tags": "ai llm programming" },
+      { "title": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml", "tags": "ai machine learning models" },
+      { "title": "Google AI", "url": "https://blog.google/technology/ai/rss/", "tags": "ai google gemini" },
+      { "title": "Import AI", "url": "https://importai.substack.com/feed", "tags": "ai research policy" },
+      { "title": "The Gradient", "url": "https://thegradient.pub/rss/", "tags": "ai research machine learning" },
+      { "title": "Latent Space", "url": "https://www.latent.space/feed", "tags": "ai engineering agents" }
+    ]},
+    { "name": "Science", "feeds": [
+      { "title": "Quanta Magazine", "url": "https://www.quantamagazine.org/feed/", "tags": "science math physics biology" },
+      { "title": "Nature", "url": "https://www.nature.com/nature.rss", "tags": "science research" },
+      { "title": "ScienceDaily", "url": "https://www.sciencedaily.com/rss/all.xml", "tags": "science research health" },
+      { "title": "New Scientist", "url": "https://www.newscientist.com/feed/home/", "tags": "science space health" },
+      { "title": "Phys.org", "url": "https://phys.org/rss-feed/", "tags": "physics science space" },
+      { "title": "NASA", "url": "https://www.nasa.gov/feed/", "tags": "space nasa rockets exploration" }
+    ]},
+    { "name": "World news", "feeds": [
+      { "title": "BBC World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml", "tags": "world news politics" },
+      { "title": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml", "tags": "world news middle east" },
+      { "title": "NPR News", "url": "https://feeds.npr.org/1001/rss.xml", "tags": "news us world" },
+      { "title": "The Guardian: World", "url": "https://www.theguardian.com/world/rss", "tags": "world news politics" },
+      { "title": "DW", "url": "https://rss.dw.com/rdf/rss-en-all", "tags": "world news europe germany" },
+      { "title": "France 24", "url": "https://www.france24.com/en/rss", "tags": "world news europe africa" },
+      { "title": "New York Times: World", "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", "tags": "world news" }
+    ]},
+    { "name": "Middle East & Caucasus", "feeds": [
+      { "title": "Middle East Eye", "url": "https://www.middleeasteye.net/rss", "tags": "middle east news" },
+      { "title": "Arab News", "url": "https://www.arabnews.com/rss.xml", "tags": "middle east gulf saudi news" },
+      { "title": "Kuwait Times", "url": "https://kuwaittimes.com/feed/", "tags": "kuwait gulf news" },
+      { "title": "OC Media", "url": "https://oc-media.org/feed/", "tags": "caucasus georgia armenia azerbaijan tbilisi" },
+      { "title": "The Armenian Weekly", "url": "https://armenianweekly.com/feed/", "tags": "armenia news" },
+      { "title": "Eurasianet", "url": "https://eurasianet.org/rss.xml", "tags": "central asia caucasus russia" },
+      { "title": "Meduza (English)", "url": "https://meduza.io/rss/en/all", "tags": "russia news" }
+    ]},
+    { "name": "Business & money", "feeds": [
+      { "title": "CNBC Top News", "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html", "tags": "business markets economy" },
+      { "title": "The Economist", "url": "https://www.economist.com/latest/rss.xml", "tags": "economy politics business" },
+      { "title": "MarketWatch", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories", "tags": "markets stocks finance" }
+    ]},
+    { "name": "Crypto", "feeds": [
+      { "title": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "tags": "crypto bitcoin blockchain" },
+      { "title": "Cointelegraph", "url": "https://cointelegraph.com/rss", "tags": "crypto bitcoin blockchain" },
+      { "title": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/feed", "tags": "bitcoin crypto" },
+      { "title": "Decrypt", "url": "https://decrypt.co/feed", "tags": "crypto web3 blockchain" }
+    ]},
+    { "name": "Security", "feeds": [
+      { "title": "Krebs on Security", "url": "https://krebsonsecurity.com/feed/", "tags": "security privacy cybercrime" },
+      { "title": "Schneier on Security", "url": "https://www.schneier.com/feed/atom/", "tags": "security privacy" },
+      { "title": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "tags": "security malware tech" },
+      { "title": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "tags": "security hacking" }
+    ]},
+    { "name": "Programming & design", "feeds": [
+      { "title": "GitHub Blog", "url": "https://github.blog/feed/", "tags": "programming open source developers" },
+      { "title": "Stack Overflow Blog", "url": "https://stackoverflow.blog/feed/", "tags": "programming developers" },
+      { "title": "Lobsters", "url": "https://lobste.rs/rss", "tags": "programming tech" },
+      { "title": "Julia Evans", "url": "https://jvns.ca/atom.xml", "tags": "programming linux" },
+      { "title": "Martin Fowler", "url": "https://martinfowler.com/feed.atom", "tags": "software architecture programming" },
+      { "title": "Smashing Magazine", "url": "https://www.smashingmagazine.com/feed/", "tags": "design web css ux" },
+      { "title": "CSS-Tricks", "url": "https://css-tricks.com/feed/", "tags": "css web design" }
+    ]},
+    { "name": "Games & sport", "feeds": [
+      { "title": "Polygon", "url": "https://www.polygon.com/rss/index.xml", "tags": "video games" },
+      { "title": "Rock Paper Shotgun", "url": "https://www.rockpapershotgun.com/feed", "tags": "pc games video games" },
+      { "title": "ESPN", "url": "https://www.espn.com/espn/rss/news", "tags": "sports football basketball" },
+      { "title": "BBC Sport", "url": "https://feeds.bbci.co.uk/sport/rss.xml", "tags": "sport football" }
+    ]},
+    { "name": "Culture & fun", "feeds": [
+      { "title": "xkcd", "url": "https://xkcd.com/atom.xml", "tags": "comics fun science" },
+      { "title": "Kottke", "url": "https://feeds.kottke.org/main", "tags": "culture links design" },
+      { "title": "Open Culture", "url": "https://www.openculture.com/feed", "tags": "culture education books" },
+      { "title": "The Marginalian", "url": "https://www.themarginalian.org/feed/", "tags": "books culture philosophy" },
+      { "title": "Flattery", "url": "https://flattery.sala.company/data/feed.xml", "tags": "apps open source clones" }
+    ]}
+  ]
+}

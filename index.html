@@ -58,6 +58,38 @@
   </form>
 </dialog>
 
+<dialog id="editFeedDialog" class="sheet">
+  <form method="dialog" id="editFeedForm">
+    <h2>Edit feed</h2>
+    <label>Name<input id="editFeedName" type="text" required></label>
+    <fieldset class="folder-pick">
+      <legend>Folders <span class="hint">(a feed can be in several)</span></legend>
+      <div id="editFeedFolders" class="checks"></div>
+      <label>New folder<input id="editFeedNewFolder" type="text" placeholder="Type a name to add one"></label>
+    </fieldset>
+    <p class="hint">Address: <span id="editFeedAddr"></span></p>
+    <div class="buttons"><button type="button" class="ghost" data-close>Cancel</button><button value="ok" class="primary">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="folderDialog" class="sheet">
+  <form method="dialog" id="folderForm">
+    <h2 id="folderDialogTitle">Folder</h2>
+    <div id="folderRename">
+      <label>Folder name<input id="folderName" type="text" required></label>
+      <div class="buttons"><button type="button" class="ghost" data-close>Cancel</button><button value="rename" class="primary">Rename</button></div>
+    </div>
+    <div id="folderDelete">
+      <p id="folderDeleteText"></p>
+      <div class="buttons">
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button value="deletekeep">Delete folder, keep its feeds</button>
+        <button value="deleteunsub" class="danger">Delete folder and unsubscribe</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="topicDialog" class="sheet">
   <form method="dialog" id="topicForm">
     <h2>New AI topic</h2>
@@ -183,6 +215,7 @@
   </form>
 </dialog>
 
+<div id="pullIndicator" class="pull" hidden aria-hidden="true">⟳ Pull to refresh</div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <canvas id="confetti" class="confetti" aria-hidden="true"></canvas>
 

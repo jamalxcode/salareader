@@ -11,7 +11,9 @@
 import { decodeVector, encodeVector, dot, embed, embedText, askAI, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const PAGE = 60;
-const OWN_ITEMS_PER_FEED = 80;
+const OWN_ITEMS_PER_FEED = 80;   // at most, per feed of your own
+const OWN_KEEP_DAYS = 30;         // older articles are dropped…
+const OWN_KEEP_MIN = 20;          // …except a feed's newest 20 (quiet blogs still show something)
 
 // ---------- storage: IndexedDB on this device ----------
 // A synchronous in-memory copy for the app, written back to IndexedDB
@@ -19,6 +21,7 @@ const OWN_ITEMS_PER_FEED = 80;
 
 const DB_NAME = 'salareader';
 const KV = 'kv';
+const BODIES = 'bodies';
 const cache = new Map();
 const dirty = new Set();
 let dbPromise = null;
@@ -27,8 +30,14 @@ let flushTimer;
 
 function openDB() {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(KV);
+    // v2 adds "bodies": article text, one record per feed, read only when you open an
+    // article (keeping it out of memory lets the reader start fast with 1,000+ feeds).
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(KV)) db.createObjectStore(KV);
+      if (!db.objectStoreNames.contains(BODIES)) db.createObjectStore(BODIES);
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
     req.onblocked = () => reject(new Error('blocked'));
@@ -128,6 +137,59 @@ async function reloadKeys(keys) {
 addEventListener('pagehide', flush);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
+// ---------- article text (separate from the rest, loaded on demand) ----------
+
+const bodyCache = new Map(); // feedId -> {itemId: html}, for feeds opened this session
+
+async function bodiesTx(mode, fn) {
+  if (useLocalStorage) return undefined;
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BODIES, mode);
+    const result = fn(tx.objectStore(BODIES));
+    tx.oncomplete = () => resolve(result?.result ?? result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+async function readBodies(feedId) {
+  if (bodyCache.has(feedId)) return bodyCache.get(feedId);
+  const map = (await bodiesTx('readonly', (os) => os.get(feedId)).catch(() => undefined)) || {};
+  bodyCache.set(feedId, map);
+  return map;
+}
+async function writeBodies(feedId, map) {
+  if (frozen) return;
+  bodyCache.set(feedId, map);
+  await bodiesTx('readwrite', (os) => os.put(map, feedId)).catch((e) => { console.warn('Saving article text failed', e); saveFailed(); });
+}
+async function deleteBodies(feedId) {
+  bodyCache.delete(feedId);
+  await bodiesTx('readwrite', (os) => os.delete(feedId)).catch(() => {});
+}
+async function clearBodies() {
+  bodyCache.clear();
+  await bodiesTx('readwrite', (os) => os.clear()).catch(() => {});
+}
+
+/** Earlier versions kept article text inside each feed's list: move it to the text store. */
+async function moveBodiesOut() {
+  for (const [fid, items] of Object.entries(S.ownItems)) {
+    if (!items.some((i) => i.c != null)) continue;
+    const map = { ...(await readBodies(fid)) };
+    for (const it of items) if (it.c) map[it.id] = it.c;
+    await writeBodies(fid, map);
+    S.ownItems[fid] = items.map(({ c, ...rest }) => rest);
+    store.set('own:' + fid, S.ownItems[fid]);
+  }
+}
+
+/** Keeps a feed's recent articles: the last 30 days, at least the newest 20, at most 80. */
+function keepRecent(items) {
+  const cutoff = Date.now() - OWN_KEEP_DAYS * 864e5;
+  return items.filter((it, k) => k < OWN_KEEP_MIN || it.d > cutoff).slice(0, OWN_ITEMS_PER_FEED);
+}
+
 const store = {
   // structuredClone keeps the stored copy separate from objects the app keeps changing.
   get(key, fallback) { return cache.has(key) ? structuredClone(cache.get(key)) : fallback; },
@@ -138,7 +200,7 @@ const store = {
 
 // The shared relay everyone uses unless they pick their own (relay/worker.js).
 const SHARED_RELAY = 'https://salareader-relay.jamal-akuna-matata.workers.dev';
-const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '' };
+const DEFAULT_SETTINGS = { theme: 'auto', unreadOnly: true, mode: 'list', sort: 'newest', viewPrefs: {}, threshold: 0.4, aiProvider: 'anthropic', keys: {}, models: {}, relayMode: 'shared', relay: '', relayToken: '' };
 
 const S = {
   index: { feeds: [], items: [], updated: 0 },
@@ -412,7 +474,7 @@ function rebuild() {
 
 async function feedContent(feedId) {
   const feed = S.feedById.get(feedId);
-  if (feed?.own) return Object.fromEntries((S.ownItems[feedId] || []).map((i) => [i.id, i.c || '']));
+  if (feed?.own) return readBodies(feedId);
   // One file with every catalog article, so the server can't tell which feeds you read.
   S.content ??= fetch(`data/content.json?u=${S.index.updated}`).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
   return S.content;
@@ -883,6 +945,9 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   if (!parsed) throw new Error(movedTo === '' && !q ? "This address now shows a web page, not a feed, and no new address could be found on the site." : 'Not an RSS or Atom feed');
   const target = adding ? feed : liveSub(feed.url);
   if (!target) return parsed;
+  // Article text goes to its own store; the list keeps titles, summaries, links.
+  const newBodies = {};
+  parsed.items = parsed.items.map(({ c, ...it }) => { if (c) newBodies[it.id] = c; return it; });
   const old = new Map((S.ownItems[target.id] || []).map((i) => [i.id, i]));
   // The same article can come back under a new id (feeds change their guids,
   // http → https…). Match by link too, so it replaces the old copy instead of
@@ -895,7 +960,14 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
     // Undated items keep the time we first saw them.
     old.set(it.id, { ...prev, ...it, d: it.dated ? it.d : prev?.d ?? it.d });
   }
-  S.ownItems[target.id] = dedupeArticles([...old.values()].sort((a, b) => b.d - a.d)).slice(0, OWN_ITEMS_PER_FEED);
+  S.ownItems[target.id] = keepRecent(dedupeArticles([...old.values()].sort((a, b) => b.d - a.d)));
+  {
+    const keepIds = new Set(S.ownItems[target.id].map((i) => i.id));
+    const prevBodies = await readBodies(target.id);
+    const bodies = {};
+    for (const [k, v] of Object.entries({ ...prevBodies, ...newBodies })) if (keepIds.has(k)) bodies[k] = v;
+    await writeBodies(target.id, bodies);
+  }
   // A feed that left the catalog: what came before isn't news to you.
   if (target.convertedAt) {
     for (const it of S.ownItems[target.id]) if (it.d < target.convertedAt && !isRead(it.id)) S.read[it.id] = Date.now();
@@ -1101,6 +1173,7 @@ function unsubscribe(id) {
   saveSubs();
   saveOwnFeed(id);
   store.del('vec:' + id);
+  deleteBodies(id);
   rebuild();
 }
 
@@ -1144,7 +1217,11 @@ function toggleStar(id) {
   const it = S.byId.get(id) || S.starred[id];
   if (!it) return;
   if (S.starred[id]) delete S.starred[id];
-  else S.starred[id] = { ...it, starredAt: Date.now() };
+  else {
+    S.starred[id] = { ...it, starredAt: Date.now() };
+    // Keep the full text with the star, so it outlives the feed's own copy.
+    if (!it.c) feedContent(it.f).then((m) => { if (S.starred[id] && m?.[id]) { S.starred[id].c = m[id]; store.set('starred', S.starred); } }).catch(() => {});
+  }
   store.set('starred', S.starred);
   updateEntryDom(id);
   renderSidebar();
@@ -1263,7 +1340,9 @@ function viewItems() {
     default: items = [];
   }
   const showAll = v.type === 'starred' || v.type === 'search' || !S.settings.unreadOnly;
-  return showAll ? items : items.filter((i) => !isRead(i.id) || v.keep?.has(i.id));
+  const shown = showAll ? items : items.filter((i) => !isRead(i.id) || v.keep?.has(i.id));
+  // Oldest first (search keeps best matches first).
+  return S.settings.sort === 'oldest' && v.type !== 'search' ? [...shown].sort((a, b) => a.d - b.d) : shown;
 }
 
 function viewTitle() {
@@ -1288,6 +1367,22 @@ function sourceItems() {
   return all;
 }
 
+// Each view (a folder, a feed, All items, a topic) remembers List/Expanded,
+// Unread/All and newest/oldest first. New views start as List, Unread, newest.
+const VIEW_DEFAULTS = { mode: 'list', unreadOnly: true, sort: 'newest' };
+const viewKey = () => `${S.view.type}:${S.view.id ?? ''}`;
+function applyViewPrefs() {
+  const p = S.settings.viewPrefs?.[viewKey()] || {};
+  for (const k of Object.keys(VIEW_DEFAULTS)) S.settings[k] = p[k] ?? VIEW_DEFAULTS[k];
+}
+function setViewPref(k, value) {
+  S.settings[k] = value;
+  S.settings.viewPrefs ??= {};
+  const key = viewKey();
+  S.settings.viewPrefs[key] = { ...S.settings.viewPrefs[key], [k]: value };
+  saveSettings();
+}
+
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const [type, ...rest] = parts;
@@ -1302,6 +1397,7 @@ function route() {
   } else S.view = { type: 'home' };
   // Articles you opened stay visible in "Unread" until you go to another view.
   S.view.keep = JSON.stringify([S.view.type, S.view.id, S.view.q]) === prevKey && prevKeep ? prevKeep : new Set();
+  applyViewPrefs();
   $('#q').value = S.view.type === 'search' ? S.view.q : '';
   S.cur = -1;
   closeSidebar();
@@ -1386,14 +1482,14 @@ function renderSidebar() {
   const names = [...folders.keys()].sort((a, b) => (a === RETIRED) - (b === RETIRED) || (a === '') - (b === '') || a.localeCompare(b));
   for (const name of names) {
     const list = folders.get(name).sort((a, b) => a.title.localeCompare(b.title));
-    const feedRow = (f) => `<a class="nav-item feed${active('feed', f.id)}${f.error ? ' broken' : ''}" href="#/feed/${f.id}" title="${esc(f.error ? `Couldn't fetch: ${f.error}` : f.url)}">
+    const feedRow = (f) => `<a class="nav-item feed${active('feed', f.id)}${f.error ? ' broken' : ''}" href="#/feed/${f.id}" draggable="true" data-feed="${esc(f.id)}" data-from="${esc(name)}" title="${esc(f.error ? `Couldn't fetch: ${f.error}` : f.url)}">
         ${avatar(f)}<span class="name">${esc(f.title)}</span>${f.error ? '<span class="warn" aria-label="Fetch problem">!</span>' : ''}${count(unreadByFeed.get(f.id) || 0)}</a>`;
     if (!name) { html += list.map(feedRow).join(''); continue; }
     const n = list.reduce((s, f) => s + (unreadByFeed.get(f.id) || 0), 0);
     const closed = folderClosed(name);
     const retired = name === RETIRED;
     html += `<div class="folder${closed ? ' closed' : ''}${retired ? ' retired' : ''}">
-      <div class="nav-item folder-row${active('folder', name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(retired ? 'Retired feeds' : name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">${retired ? '📦 Retired feeds' : `📁 ${esc(name)}`}</a>${retired ? `<span class="count muted">${list.length}</span>` : count(n)}</div>
+      <div class="nav-item folder-row${active('folder', name)}" data-drop="${esc(name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(retired ? 'Retired feeds' : name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">${retired ? '📦 Retired feeds' : `📁 ${esc(name)}`}</a>${retired ? `<span class="count muted">${list.length}</span>` : count(n)}</div>
       <div class="folder-feeds">${list.map(feedRow).join('')}</div></div>`;
   }
   if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
@@ -1438,12 +1534,16 @@ function renderHeader() {
     <div class="vh-actions">
       ${filterable ? `<div class="seg" role="group" aria-label="Show"><button data-act="unread" class="${S.settings.unreadOnly ? 'on' : ''}">Unread</button><button data-act="allitems" class="${S.settings.unreadOnly ? '' : 'on'}">All</button></div>` : ''}
       <div class="seg" role="group" aria-label="View"><button data-act="list" class="${S.settings.mode === 'list' ? 'on' : ''}" title="List view (1)">☰ List</button><button data-act="expanded" class="${S.settings.mode === 'expanded' ? 'on' : ''}" title="Expanded view (2)">▤ Expanded</button></div>
-      ${v.type !== 'starred' ? `<button data-act="markall" title="Mark all as read (Shift+A)">✓ Mark all read</button>` : ''}
+      ${v.type !== 'search' ? `<div class="seg" role="group" aria-label="Order"><button data-act="newest" class="${S.settings.sort !== 'oldest' ? 'on' : ''}" title="Newest first">↓ Newest</button><button data-act="oldest" class="${S.settings.sort === 'oldest' ? 'on' : ''}" title="Oldest first">↑ Oldest</button></div>` : ''}
+      ${v.type !== 'starred' ? `<details class="menu"><summary class="button" title="Mark as read (Shift+A marks all)">✓ Mark read ▾</summary><div class="menu-list"><button data-act="markall">All</button><button data-act="markold" data-days="1">Older than a day</button><button data-act="markold" data-days="7">Older than a week</button></div></details>` : ''}
+      ${v.type === 'topic' ? `<button data-act="renametopic">✎ Rename topic</button>` : ''}
       <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
       ${v.type === 'search' ? `<button data-act="savetopic" title="Follow this search as an AI topic">＋ Save as topic</button>` : ''}
       ${v.type === 'topic' ? `<button data-act="deltopic" class="ghost" title="Delete this topic">Delete topic</button>` : ''}
       ${v.type === 'folder' && v.id === RETIRED && S.feeds.some((f) => f.retired) ? `<button data-act="unsubretired" class="ghost danger">Delete all retired feeds</button>` : ''}
       ${feed?.retired ? `<button data-act="keepfeed" data-id="${esc(feed.id)}">↻ Keep trying</button>` : feed?.own && feed.error ? `<button data-act="retry">⟳ Try again</button>` : ''}
+      ${feed ? `<button data-act="editfeed">✎ Edit</button>` : ''}
+      ${v.type === 'folder' && v.id && v.id !== RETIRED ? `<button data-act="renamefolder">✎ Rename</button><button data-act="sharefolder" title="Save this folder's feeds as an OPML file to share">⇪ Share folder</button><button data-act="deletefolder" class="ghost danger">Delete folder</button>` : ''}
       ${feed ? `<button data-act="unsub" class="ghost">Unsubscribe</button>` : ''}
     </div>
     <div class="brief" id="brief" hidden></div>`;
@@ -1607,6 +1707,90 @@ function renderHome() {
 
 function updateTitle() {
   document.title = S.view.type === 'home' ? `Sala Reader${S.unread ? ` (${S.unread})` : ''}` : `${viewTitle()} · Sala Reader`;
+}
+
+// ---------- organising: rename and move feeds, rename and delete folders ----------
+
+const allFolderNames = () => [...new Set(S.feeds.flatMap(feedFolders))].filter((n) => n && n !== RETIRED).sort((a, b) => a.localeCompare(b));
+
+/** Puts a feed in exactly these folders. */
+function setFeedFolders(sub, names) {
+  const list = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
+  sub.folder = list[0] || '';
+  if (list.length > 1) sub.folders = list.slice(1); else delete sub.folders;
+}
+
+function openEditFeed(id) {
+  const f = S.feedById.get(id);
+  const sub = f && liveSub(f.url);
+  if (!sub) return;
+  S.editing = sub.url;
+  $('#editFeedName').value = f.title;
+  const mine = new Set(feedFolders(f).filter((n) => n !== RETIRED));
+  $('#editFeedFolders').innerHTML = allFolderNames().map((n) => `<label class="check"><input type="checkbox" value="${esc(n)}"${mine.has(n) ? ' checked' : ''}> 📁 ${esc(n)}</label>`).join('') || '<p class="hint">No folders yet.</p>';
+  $('#editFeedNewFolder').value = '';
+  $('#editFeedAddr').textContent = f.url;
+  $('#editFeedDialog').showModal();
+}
+
+function saveEditFeed() {
+  const sub = liveSub(S.editing);
+  if (!sub) return;
+  const name = $('#editFeedName').value.trim();
+  if (name) { sub.title = name; sub.titleSet = true; }
+  const picked = [...document.querySelectorAll('#editFeedFolders input:checked')].map((c) => c.value);
+  const extra = $('#editFeedNewFolder').value.trim();
+  if (extra) picked.push(extra);
+  setFeedFolders(sub, picked);
+  saveSubs();
+  rebuild();
+  render();
+  toast('Saved');
+}
+
+/** Moves a feed out of one folder into another (drag and drop in the sidebar). */
+function moveFeed(id, from, to) {
+  const sub = liveSub(S.feedById.get(id)?.url);
+  if (!sub || from === to || to === RETIRED) return;
+  const names = feedFolders(sub).filter((n) => n && n !== from && n !== RETIRED);
+  setFeedFolders(sub, [to, ...names]);
+  saveSubs();
+  rebuild();
+  renderSidebar();
+  toast(`Moved ${sub.title} to ${to}`);
+}
+
+function openFolderDialog(name, mode) {
+  S.folderEditing = name;
+  const n = S.feeds.filter((f) => feedFolders(f).includes(name)).length;
+  $('#folderDialogTitle').textContent = mode === 'rename' ? 'Rename folder' : `Delete “${name}”?`;
+  $('#folderRename').hidden = mode !== 'rename';
+  $('#folderDelete').hidden = mode !== 'delete';
+  $('#folderName').value = name;
+  $('#folderName').required = mode === 'rename';
+  $('#folderDeleteText').textContent = `It has ${n} feed${n === 1 ? '' : 's'}. Keep them (they stay in any other folders, or go unfiled), or unsubscribe from them?`;
+  $('#folderDialog').showModal();
+}
+
+function renameFolder(from, to) {
+  to = to.trim();
+  if (!to || to === from) return;
+  for (const sub of S.subs || []) if (feedFolders(sub).includes(from)) setFeedFolders(sub, feedFolders(sub).map((n) => (n === from ? to : n)));
+  if (from in S.collapsed) { S.collapsed[to] = S.collapsed[from]; delete S.collapsed[from]; store.set('collapsed', S.collapsed); }
+  saveSubs();
+  rebuild();
+  go(`#/folder/${encodeURIComponent(to)}`);
+  toast(`Renamed to ${to}`);
+}
+
+function deleteFolder(name, unsubscribeToo) {
+  const inside = S.feeds.filter((f) => feedFolders(f).includes(name));
+  if (unsubscribeToo) for (const f of inside) unsubscribe(f.id);
+  else for (const f of inside) { const sub = liveSub(f.url); if (sub) setFeedFolders(sub, feedFolders(sub).filter((n) => n !== name)); }
+  saveSubs();
+  rebuild();
+  go('#/home');
+  toast(unsubscribeToo ? `Deleted ${name} and unsubscribed from ${inside.length} feed${inside.length === 1 ? '' : 's'}` : `Deleted ${name}; its feeds were kept`);
 }
 
 /** The Retired feeds page: each feed, why it was retired, and what you can do. */
@@ -1926,13 +2110,20 @@ function download(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function exportOPML() {
+/** OPML of all your feeds, or of one folder (to share it). Only feed addresses and names, nothing about your reading. */
+function exportOPML(onlyFolder) {
   const folders = new Map();
-  for (const f of S.feeds) for (const k of feedFolders(f)) { if (!folders.has(k)) folders.set(k, []); folders.get(k).push(f); }
+  for (const f of S.feeds) for (const k of feedFolders(f)) {
+    if (k === RETIRED || (onlyFolder && k !== onlyFolder)) continue;
+    if (!folders.has(k)) folders.set(k, []);
+    folders.get(k).push(f);
+  }
   const x = (s) => esc(s);
   const line = (f) => `      <outline type="rss" text="${x(f.title)}" title="${x(f.title)}" xmlUrl="${x(f.url)}"${f.site ? ` htmlUrl="${x(f.site)}"` : ''}/>`;
   const body = [...folders].map(([name, list]) => (name ? `    <outline text="${x(name)}" title="${x(name)}">\n${list.map(line).join('\n')}\n    </outline>` : list.map(line).join('\n').replace(/^ {2}/gm, ''))).join('\n');
-  download('salareader.opml', `<?xml version="1.0" encoding="UTF-8"?>\n<opml version="2.0">\n  <head><title>Sala Reader subscriptions</title></head>\n  <body>\n${body}\n  </body>\n</opml>\n`, 'text/x-opml');
+  const fileName = onlyFolder ? `${onlyFolder.replace(/[^\p{L}\p{N} _-]/gu, '').trim() || 'folder'}.opml` : 'salareader.opml';
+  if (onlyFolder) toast('Saved this folder as an OPML file. Send it to anyone; they import it in ⚙ Settings → Import OPML.', 5000);
+  download(fileName, `<?xml version="1.0" encoding="UTF-8"?>\n<opml version="2.0">\n  <head><title>${onlyFolder ? esc(onlyFolder) : 'Sala Reader subscriptions'}</title></head>\n  <body>\n${body}\n  </body>\n</opml>\n`, 'text/x-opml');
 }
 
 // ---------- backup: move everything to another device ----------
@@ -1969,6 +2160,7 @@ async function importBackup(file) {
   const keepRelayToken = S.settings.relayToken;
   stopRefresh = true; // a feed refresh still running must not write old data back
   for (const k of store.keys()) if (BACKUP_KEYS.includes(k) || isPerFeedKey(k)) store.del(k);
+  await clearBodies(); // articles' full text is fetched again; the backup holds titles and summaries
   for (const k of BACKUP_KEYS) if (k in d) store.set(k, d[k]);
   for (const [id, items] of Object.entries(d.ownItems || {})) if (Array.isArray(items)) store.set('own:' + id, items);
   // A backup without keys keeps the keys already on this device.
@@ -1981,6 +2173,7 @@ async function importBackup(file) {
 async function eraseEverything() {
   stopRefresh = true;
   for (const k of store.keys()) store.del(k);
+  await clearBodies();
   frozen = true;
   await flush();
   try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k?.startsWith('sr.')) localStorage.removeItem(k); } } catch { /* blocked */ }
@@ -2048,7 +2241,7 @@ function applyKeys(keys) {
   for (const k of keys) {
     if (fields[k]) S[fields[k]] = store.get(k, k === 'subs' ? null : Array.isArray(S[fields[k]]) ? [] : {});
     else if (k === 'settings') { S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) }; applyTheme(); }
-    else if (k.startsWith('own:')) { const v = store.get(k, null); if (v) S.ownItems[k.slice(4)] = v; else delete S.ownItems[k.slice(4)]; }
+    else if (k.startsWith('own:')) { bodyCache.delete(k.slice(4)); const v = store.get(k, null); if (v) S.ownItems[k.slice(4)] = v; else delete S.ownItems[k.slice(4)]; }
   }
 }
 
@@ -2108,11 +2301,26 @@ function wire() {
       if (article && act === 'related') { related(article); return; }
       if (article && act === 'share') { share(article); return; }
       switch (act) {
-        case 'unread': S.settings.unreadOnly = true; saveSettings(); render(); return;
-        case 'allitems': S.settings.unreadOnly = false; saveSettings(); render(); return;
+        case 'unread': setViewPref('unreadOnly', true); render(); return;
+        case 'allitems': setViewPref('unreadOnly', false); render(); return;
+        case 'newest': setViewPref('sort', 'newest'); render(); return;
+        case 'oldest': setViewPref('sort', 'oldest'); render(); return;
+        case 'markold': {
+          const days = +btn.dataset.days;
+          const cutoff = Date.now() - days * 864e5;
+          btn.closest('details')?.removeAttribute('open');
+          markAllRead(sourceItems().filter((i) => i.d < cutoff));
+          return;
+        }
+        case 'renametopic': {
+          const t = S.topics.find((x) => x.id === S.view.id);
+          const name = t && prompt('Topic name', t.name);
+          if (name?.trim()) { t.name = name.trim(); store.set('topics', S.topics); render(); }
+          return;
+        }
         case 'list': setMode('list'); return;
         case 'expanded': setMode('expanded'); return;
-        case 'markall': markAllRead(sourceItems()); return;
+        case 'markall': btn.closest('details')?.removeAttribute('open'); markAllRead(sourceItems()); return;
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
         case 'refresh': refresh(); return;
@@ -2126,6 +2334,10 @@ function wire() {
           return;
         }
         case 'keepfeed': keepFeed(btn.dataset.id); return;
+        case 'editfeed': openEditFeed(S.view.id); return;
+        case 'renamefolder': openFolderDialog(S.view.id, 'rename'); return;
+        case 'deletefolder': openFolderDialog(S.view.id, 'delete'); return;
+        case 'sharefolder': exportOPML(S.view.id); return;
         case 'unsubone': {
           const f = S.feedById.get(btn.dataset.id);
           if (f && confirm(`Unsubscribe from ${f.title}?`)) { unsubscribe(f.id); render(); }
@@ -2164,7 +2376,7 @@ function wire() {
         }
       }
     }
-    if (article && e.target.closest('.row') && !e.target.closest('a')) {
+    if (article && e.target.closest('.row') && !e.target.closest('a') && !S.swipedRecently?.()) {
       if (S.settings.mode === 'expanded') select(+article.dataset.idx, { open: true, scroll: false });
       else toggleEntry(article);
     }
@@ -2176,6 +2388,94 @@ function wire() {
 
   // Close/Cancel buttons (not submit buttons, so Enter in a field submits the form)
   document.addEventListener('click', (e) => { const c = e.target.closest('[data-close]'); if (c) c.closest('dialog')?.close(); });
+
+  // Phones: swipe an article right to star it, left to mark it read or unread.
+  let sw = null;
+  let lastSwipe = 0;
+  S.swipedRecently = () => Date.now() - lastSwipe < 450;
+  $('#list').addEventListener('touchstart', (e) => {
+    const row = e.target.closest('.row');
+    if (!row || e.touches.length > 1) return;
+    sw = { row, x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0, axis: null };
+  }, { passive: true });
+  $('#list').addEventListener('touchmove', (e) => {
+    if (!sw) return;
+    const dx = e.touches[0].clientX - sw.x;
+    const dy = e.touches[0].clientY - sw.y;
+    if (!sw.axis && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) sw.axis = Math.abs(dx) > Math.abs(dy) * 1.5 ? 'x' : 'y';
+    if (sw.axis !== 'x') return;
+    sw.dx = dx;
+    sw.row.style.transform = `translateX(${Math.max(-140, Math.min(140, dx))}px)`;
+    sw.row.classList.toggle('swipe-star', dx > 70);
+    sw.row.classList.toggle('swipe-read', dx < -70);
+  }, { passive: true });
+  $('#list').addEventListener('touchend', () => {
+    if (!sw) return;
+    const { row, dx, axis } = sw;
+    sw = null;
+    row.style.transform = '';
+    row.classList.remove('swipe-star', 'swipe-read');
+    const a = row.closest('article.entry');
+    if (axis !== 'x' || !a) return;
+    lastSwipe = Date.now();
+    if (dx > 70) { toggleStar(a.dataset.id); toast(S.starred[a.dataset.id] ? '★ Starred' : 'Star removed', 1200); }
+    else if (dx < -70) { S.view.keep?.add(a.dataset.id); markRead(a.dataset.id, !isRead(a.dataset.id)); toast(isRead(a.dataset.id) ? 'Marked read' : 'Kept unread', 1200); }
+  });
+
+  // Phones: pull down at the top of the page to refresh.
+  let pull = null;
+  const ind = $('#pullIndicator');
+  document.addEventListener('touchstart', (e) => {
+    if (window.scrollY > 0 || e.target.closest('dialog, #sidebar, .row')) return;
+    pull = { y: e.touches[0].clientY, d: 0 };
+  }, { passive: true });
+  document.addEventListener('touchmove', (e) => {
+    if (!pull) return;
+    pull.d = e.touches[0].clientY - pull.y;
+    if (pull.d <= 10 || window.scrollY > 0) { ind.hidden = true; return; }
+    ind.hidden = false;
+    ind.style.transform = `translate(-50%, ${Math.min(pull.d, 140) / 2}px)`;
+    ind.classList.toggle('ready', pull.d > 90);
+    ind.textContent = pull.d > 90 ? '⟳ Release to refresh' : '⟳ Pull to refresh';
+  }, { passive: true });
+  document.addEventListener('touchend', () => {
+    if (!pull) return;
+    const go = pull.d > 90 && window.scrollY <= 0;
+    pull = null;
+    ind.hidden = true;
+    if (go) refresh();
+  });
+
+  // Edit feed / folder dialogs
+  $('#editFeedForm').addEventListener('submit', (e) => { if (e.submitter?.value === 'ok') saveEditFeed(); });
+  $('#folderForm').addEventListener('submit', (e) => {
+    const v = e.submitter?.value;
+    if (v === 'rename') renameFolder(S.folderEditing, $('#folderName').value);
+    else if (v === 'deletekeep') deleteFolder(S.folderEditing, false);
+    else if (v === 'deleteunsub') deleteFolder(S.folderEditing, true);
+  });
+  // Drag a feed onto a folder to move it there.
+  $('#sidebar').addEventListener('dragstart', (e) => {
+    const row = e.target.closest?.('a.feed[data-feed]');
+    if (!row) return;
+    e.dataTransfer.setData('text/x-salareader-feed', JSON.stringify({ id: row.dataset.feed, from: row.dataset.from }));
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  $('#sidebar').addEventListener('dragover', (e) => {
+    const target = e.target.closest?.('[data-drop]');
+    if (!target || target.dataset.drop === RETIRED || !e.dataTransfer.types.includes('text/x-salareader-feed')) return;
+    e.preventDefault();
+    document.querySelectorAll('.drop-target').forEach((x) => x !== target && x.classList.remove('drop-target'));
+    target.classList.add('drop-target');
+  });
+  $('#sidebar').addEventListener('dragleave', (e) => { e.target.closest?.('[data-drop]')?.classList.remove('drop-target'); });
+  $('#sidebar').addEventListener('drop', (e) => {
+    const target = e.target.closest?.('[data-drop]');
+    document.querySelectorAll('.drop-target').forEach((x) => x.classList.remove('drop-target'));
+    if (!target) return;
+    e.preventDefault();
+    try { const { id, from } = JSON.parse(e.dataTransfer.getData('text/x-salareader-feed')); moveFeed(id, from, target.dataset.drop); } catch { /* not a feed */ }
+  });
 
   // Add-feed dialog
   $('#discoverList').addEventListener('click', (e) => {
@@ -2247,7 +2547,7 @@ function wire() {
     if (changed && S.view.type !== 'home') render(); else renderSidebar();
   });
   $('#opmlFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) { $('#settingsDialog').close(); importOPML(f); } e.target.value = ''; });
-  $('#exportOpml').addEventListener('click', exportOPML);
+  $('#exportOpml').addEventListener('click', () => exportOPML());
   $('#relayModes').addEventListener('change', (e) => {
     if (e.target.name !== 'relayMode') return;
     S.settings.relayMode = e.target.value;
@@ -2336,8 +2636,7 @@ function wire() {
 }
 
 function setMode(mode) {
-  S.settings.mode = mode;
-  saveSettings();
+  setViewPref('mode', mode);
   if (S.view.type !== 'home') render();
 }
 
@@ -2391,6 +2690,7 @@ async function refresh() {
 async function start() {
   await loadStore();
   loadState();
+  await moveBodiesOut();
   applyTheme();
   wire();
   finishOpenRouterSignIn().then((key) => {
