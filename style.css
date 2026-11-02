@@ -507,3 +507,117 @@ body.inv-open .inv-panel {
 .yt-play { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 26px; text-shadow: 0 1px 6px rgba(0,0,0,.7); }
 .yt-frame { aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; background: #000; }
 .yt-frame iframe { width: 100%; height: 100%; border: 0; display: block; }
+
+/* ---------- colour ----------
+   The reading area is white, side panels (investigations, AI answers, More like
+   this) are grey, and commands and topics each get a colour. Each colour is a
+   soft background with a deep text colour (4.5:1 contrast or better); "on"
+   states swap them. */
+:root {
+  --side: #f1f3f4;
+  --c-blue-bg: #e3edfd;   --c-blue-fg: #1a56b8;
+  --c-green-bg: #dcf3e4;  --c-green-fg: #17683b;
+  --c-amber-bg: #fdf0cc;  --c-amber-fg: #7d5200;
+  --c-orange-bg: #ffe6d5; --c-orange-fg: #9a4100;
+  --c-red-bg: #fde3e1;    --c-red-fg: #b0251d;
+  --c-pink-bg: #fbe1f0;   --c-pink-fg: #9e1858;
+  --c-purple-bg: #efe3fb; --c-purple-fg: #7329b8;
+  --c-indigo-bg: #e5e7fb; --c-indigo-fg: #3a43ad;
+  --c-teal-bg: #d7f3f1;   --c-teal-fg: #0c6a64;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="classic"]):not([data-theme="paper"]) {
+    --side: #202226;
+    --c-blue-bg: #1d3354;   --c-blue-fg: #a8c7fa;
+    --c-green-bg: #173d2a;  --c-green-fg: #8fd8a8;
+    --c-amber-bg: #3d3110;  --c-amber-fg: #f5d27a;
+    --c-orange-bg: #43260f; --c-orange-fg: #ffb784;
+    --c-red-bg: #45201e;    --c-red-fg: #f5a39d;
+    --c-pink-bg: #43192f;   --c-pink-fg: #f4a6cf;
+    --c-purple-bg: #33254a; --c-purple-fg: #d4b1f8;
+    --c-indigo-bg: #262a4f; --c-indigo-fg: #b3b9f5;
+    --c-teal-bg: #113a38;   --c-teal-fg: #84d8d1;
+  }
+}
+:root[data-theme="dark"] {
+  --side: #202226;
+  --c-blue-bg: #1d3354;   --c-blue-fg: #a8c7fa;
+  --c-green-bg: #173d2a;  --c-green-fg: #8fd8a8;
+  --c-amber-bg: #3d3110;  --c-amber-fg: #f5d27a;
+  --c-orange-bg: #43260f; --c-orange-fg: #ffb784;
+  --c-red-bg: #45201e;    --c-red-fg: #f5a39d;
+  --c-pink-bg: #43192f;   --c-pink-fg: #f4a6cf;
+  --c-purple-bg: #33254a; --c-purple-fg: #d4b1f8;
+  --c-indigo-bg: #262a4f; --c-indigo-fg: #b3b9f5;
+  --c-teal-bg: #113a38;   --c-teal-fg: #84d8d1;
+}
+:root[data-theme="paper"] { --side: #f1eadc; }
+:root[data-theme="classic"] { --side: #ebeff9; }
+
+/* Which colour each thing gets. */
+[data-hue="blue"]   { --h-bg: var(--c-blue-bg);   --h-fg: var(--c-blue-fg); }
+[data-hue="green"]  { --h-bg: var(--c-green-bg);  --h-fg: var(--c-green-fg); }
+[data-hue="amber"]  { --h-bg: var(--c-amber-bg);  --h-fg: var(--c-amber-fg); }
+[data-hue="orange"] { --h-bg: var(--c-orange-bg); --h-fg: var(--c-orange-fg); }
+[data-hue="red"]    { --h-bg: var(--c-red-bg);    --h-fg: var(--c-red-fg); }
+[data-hue="pink"]   { --h-bg: var(--c-pink-bg);   --h-fg: var(--c-pink-fg); }
+[data-hue="purple"] { --h-bg: var(--c-purple-bg); --h-fg: var(--c-purple-fg); }
+[data-hue="indigo"] { --h-bg: var(--c-indigo-bg); --h-fg: var(--c-indigo-fg); }
+[data-hue="teal"]   { --h-bg: var(--c-teal-bg);   --h-fg: var(--c-teal-fg); }
+
+/* Commands: by what they do. */
+[data-act="star"], [data-act="keepfeed"], [data-act="retry"] { --h-bg: var(--c-amber-bg); --h-fg: var(--c-amber-fg); }
+[data-act="unread"], [data-act="markall"], [data-act="markold"], details.menu > summary { --h-bg: var(--c-green-bg); --h-fg: var(--c-green-fg); }
+.actions a.button, [data-act="editfeed"], [data-act="renamefolder"], [data-act="copyaddr"] { --h-bg: var(--c-blue-bg); --h-fg: var(--c-blue-fg); }
+[data-act="fullarticle"], [data-act="share"], [data-act="sharefolder"] { --h-bg: var(--c-teal-bg); --h-fg: var(--c-teal-fg); }
+[data-act="summarize"], [data-act="brief"], [data-act="savetopic"], [data-act="renametopic"] { --h-bg: var(--c-purple-bg); --h-fg: var(--c-purple-fg); }
+[data-act="related"] { --h-bg: var(--c-indigo-bg); --h-fg: var(--c-indigo-fg); }
+[data-act="digdeeper"], [data-act="investigate"] { --h-bg: var(--c-orange-bg); --h-fg: var(--c-orange-fg); }
+[data-act="unsub"], [data-act="deletefolder"], [data-act="unsubretired"], [data-act="deltopic"] { --h-bg: var(--c-red-bg); --h-fg: var(--c-red-fg); }
+.seg[aria-label="Show"]  { --h-bg: var(--c-green-bg);  --h-fg: var(--c-green-fg); }
+.seg[aria-label="View"]  { --h-bg: var(--c-blue-bg);   --h-fg: var(--c-blue-fg); }
+.seg[aria-label="Order"] { --h-bg: var(--c-indigo-bg); --h-fg: var(--c-indigo-fg); }
+
+.vh-actions > button, .vh-actions > details.menu > summary, .actions > button, .actions > a.button {
+  background: var(--h-bg, var(--bg)); color: var(--h-fg, var(--text)); border-color: transparent; font-weight: 500;
+}
+.vh-actions > button:hover, .vh-actions > details.menu > summary:hover, .actions > button:hover, .actions > a.button:hover {
+  background: var(--h-bg, var(--bg-hover)); filter: saturate(1.4) brightness(.97); box-shadow: inset 0 0 0 1px var(--h-fg, var(--border));
+}
+.actions > button.on { background: var(--h-fg); color: var(--bg); }
+.seg { border-color: transparent; background: var(--h-bg); }
+.seg button { color: var(--h-fg); font-weight: 500; }
+.seg button + button { border-left-color: color-mix(in srgb, var(--h-fg) 25%, transparent); }
+.seg button.on { background: var(--h-fg); color: var(--bg); }
+.seg button:hover:not(.on) { background: color-mix(in srgb, var(--h-fg) 12%, transparent); }
+
+/* Topics: smart folders, AI topics and investigations get a coloured badge, and their colour when open. */
+.nav-item[data-hue] .ico { display: inline-grid; place-items: center; width: 26px; height: 26px; margin-left: -4px; border-radius: 8px; background: var(--h-bg); }
+.nav-item[data-hue].active { background: var(--h-bg); color: var(--h-fg); }
+.nav-item[data-hue].active .count { color: var(--h-fg); }
+
+/* Chips (prompts, follow switches, topics on Home, Discover) cycle through the colours. */
+.chip { background: var(--h-bg, var(--bg)); color: var(--h-fg, var(--text)); border-color: transparent; font-weight: 500; }
+.chip b { color: inherit; }
+.chip:hover { background: var(--h-bg, var(--bg-hover)); box-shadow: inset 0 0 0 1px var(--h-fg, var(--border)); }
+.chip.on { background: var(--h-fg, var(--accent)); color: var(--bg); }
+.chip:nth-child(9n+1) { --h-bg: var(--c-blue-bg);   --h-fg: var(--c-blue-fg); }
+.chip:nth-child(9n+2) { --h-bg: var(--c-purple-bg); --h-fg: var(--c-purple-fg); }
+.chip:nth-child(9n+3) { --h-bg: var(--c-green-bg);  --h-fg: var(--c-green-fg); }
+.chip:nth-child(9n+4) { --h-bg: var(--c-orange-bg); --h-fg: var(--c-orange-fg); }
+.chip:nth-child(9n+5) { --h-bg: var(--c-teal-bg);   --h-fg: var(--c-teal-fg); }
+.chip:nth-child(9n+6) { --h-bg: var(--c-pink-bg);   --h-fg: var(--c-pink-fg); }
+.chip:nth-child(9n+7) { --h-bg: var(--c-indigo-bg); --h-fg: var(--c-indigo-fg); }
+.chip:nth-child(9n+8) { --h-bg: var(--c-amber-bg);  --h-fg: var(--c-amber-fg); }
+.chip:nth-child(9n+9) { --h-bg: var(--c-red-bg);    --h-fg: var(--c-red-fg); }
+.inv-follow .chip[data-what="topic"] { --h-bg: var(--c-purple-bg); --h-fg: var(--c-purple-fg); }
+.inv-follow .chip[data-what="feed"]  { --h-bg: var(--c-green-bg);  --h-fg: var(--c-green-fg); }
+.inv-follow .chip[data-what="x"]     { --h-bg: var(--c-blue-bg);   --h-fg: var(--c-blue-fg); }
+
+/* The reading area is white; side panels are grey. */
+main, .entry.expanded, .entry .body { background: var(--bg); }
+body.inv-open .inv-panel, .inv-ask { background: var(--side); }
+.inv-a { background: var(--bg); }
+.ai-out, .brief, .related { background: var(--side); border: 1px solid var(--border); border-radius: var(--radius); }
+.related { padding: 12px 16px; }
+.ai-out .via, .brief .via { color: var(--text-2); }

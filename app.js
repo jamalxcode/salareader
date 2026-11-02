@@ -503,7 +503,9 @@ function buildSmart() {
     if (run !== smartRun) return;
     const first = !S.smart;
     S.smart = smart;
-    if (first || S.view.type === 'smart') { renderSidebar(); if (S.view.type === 'smart') render(); } else scheduleCounts();
+    // Draw a smart folder's list only the first time (it was empty until now);
+    // later passes just update counts, so an article you opened stays open.
+    if (first) { renderSidebar(); if (S.view.type === 'smart') render(); } else scheduleCounts();
   })();
 }
 
@@ -1676,7 +1678,7 @@ function renderSidebar() {
   for (const t of S.topics) {
     let n = '';
     if (S.vectorsState === 'ready' || S.vectorsState === 'missing') n = count(unreadOf(topicMatches(t).items));
-    html += `<a class="nav-item${active('topic', t.id)}" href="#/topic/${t.id}"><span class="ico">✨</span><span class="name">${esc(t.name)}</span>${n}</a>`;
+    html += `<a class="nav-item${active('topic', t.id)}" data-hue="${hueOf('t' + t.id)}" href="#/topic/${t.id}"><span class="ico">✨</span><span class="name">${esc(t.name)}</span>${n}</a>`;
   }
   html += invSidebarHTML(active, count);
   html += `<div class="nav-section"><span>Subscriptions</span></div>`;
@@ -1699,6 +1701,16 @@ function renderSidebar() {
   nav.innerHTML = html;
 }
 
+// Each topic's colour (see [data-hue] in style.css).
+const HUES = ['blue', 'purple', 'green', 'orange', 'teal', 'pink', 'indigo', 'amber', 'red'];
+const SMART_HUES = {
+  'topic:politics': 'indigo', 'topic:conflict': 'red', 'topic:business': 'green', 'topic:tech': 'blue', 'topic:ai': 'purple',
+  'topic:crypto': 'amber', 'topic:science': 'teal', 'topic:health': 'pink', 'topic:climate': 'green', 'topic:security': 'orange',
+  'topic:sport': 'teal', 'topic:games': 'purple', 'topic:culture': 'pink', 'topic:programming': 'indigo',
+  'meta:today': 'blue', 'meta:video': 'red', 'meta:audio': 'purple', 'meta:long': 'teal', 'meta:opinion': 'amber',
+};
+const hueOf = (id) => SMART_HUES[id] || HUES[[...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % HUES.length];
+
 /** Smart folders under Starred: languages, topics and kinds, each with its unread count (empty ones hidden). */
 function smartSidebarHTML(active, count) {
   if (!S.smart) return '';
@@ -1707,7 +1719,7 @@ function smartSidebarHTML(active, count) {
     const n = unreadIn(id);
     if (!n && !active('smart', id)) return '';
     const i = smartInfo(id);
-    return `<a class="nav-item smart${active('smart', id)}" href="#/smart/${encodeURIComponent(id)}"><span class="ico">${i.icon}</span><span class="name">${esc(i.name)}</span>${count(n)}</a>`;
+    return `<a class="nav-item smart${active('smart', id)}" data-hue="${hueOf(id)}" href="#/smart/${encodeURIComponent(id)}"><span class="ico">${i.icon}</span><span class="name">${esc(i.name)}</span>${count(n)}</a>`;
   };
   const langs = Object.keys(LANGS).map((k) => 'lang:' + k).map((id) => [id, unreadIn(id)]).filter(([, n]) => n).sort((a, b) => b[1] - a[1]).map(([id]) => row(id)).join('');
   const groups = [
@@ -2629,7 +2641,7 @@ function invSidebarHTML(active, count) {
   if (!S.invs?.length) return '';
   return `<div class="nav-section"><span>Investigations</span></div>` + S.invs.map((inv) => {
     const n = S.invOpen === inv.id ? 0 : invNew(inv).length;
-    return `<a class="nav-item inv${S.invOpen === inv.id ? ' active' : ''}" href="#" data-inv="${esc(inv.id)}"><span class="ico">🕵️</span><span class="name">${esc(inv.name)}</span>${inv.follow?.x ? '<span class="muted" title="Watching X">𝕏</span>' : ''}${count(n)}</a>`;
+    return `<a class="nav-item inv${S.invOpen === inv.id ? ' active' : ''}" data-hue="${hueOf('i' + inv.id)}" href="#" data-inv="${esc(inv.id)}"><span class="ico">🕵️</span><span class="name">${esc(inv.name)}</span>${inv.follow?.x ? '<span class="muted" title="Watching X">𝕏</span>' : ''}${count(n)}</a>`;
   }).join('');
 }
 

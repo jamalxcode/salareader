@@ -299,6 +299,7 @@ function grokCitations(res, text) {
   const out = new Map();
   const add = (url, title) => {
     if (typeof url !== 'string' || !/^https?:\/\//.test(url)) return;
+    if (/^\s*\[?\d+\]?\s*$/.test(title || '')) title = ''; // Grok sometimes titles them just "1", "2"…
     if (!out.has(url)) out.set(url, { url, title: title || '' });
     else if (title && !out.get(url).title) out.get(url).title = title;
   };
