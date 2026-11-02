@@ -67,7 +67,9 @@ await step('AI search by meaning (downloads the model)', async () => {
   let last = '';
   await page.waitForFunction(() => {
     const sub = document.querySelector('#viewHeader .sub')?.textContent || '';
-    return location.hash.startsWith('#/search/') && sub && !/Finding articles|Downloading/.test(sub);
+    // The search page's own header (not the previous page's), finished searching.
+    const onSearch = /“space exploration and rockets”/.test(document.querySelector('#viewHeader h1')?.textContent || '');
+    return location.hash.startsWith('#/search/') && onSearch && sub && !/Finding articles|Downloading/.test(sub);
   }, null, { timeout: 240000, polling: 500 }).catch(async (e) => { last = await page.$eval('#viewHeader .sub', (x) => x.textContent).catch(() => '?'); throw new Error(`still "${last}"`); });
   info('AI search took', `${Math.round((Date.now() - t0) / 1000)} s`);
   const sub = await page.$eval('#viewHeader .sub', (e) => e.textContent);
