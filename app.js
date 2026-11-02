@@ -208,6 +208,12 @@ function loadState() {
     store.set('ytRetried', true);
     saveSubs();
   }
+  // Feeds that were gone before the reader could find moved feeds: try once now.
+  if (S.subs && !store.get('movesRetried', false)) {
+    for (const sub of S.subs) if (sub.error && /404|410|Not an RSS|refuses requests|HTTP 53\d|HTTP 52\d/.test(sub.error)) { delete sub.lastTry; delete sub.ok; }
+    store.set('movesRetried', true);
+    saveSubs();
+  }
   // Google News searches fetched before the Bing fallback existed: fetch them again now.
   if (S.subs && !store.get('gnRetried', false)) {
     for (const sub of S.subs) if (googleNewsQuery(sub.url) && !sub.via) delete sub.ok;
@@ -531,14 +537,16 @@ async function fetchFeedText(url, { relayOnly = false, feed = null } = {}) {
   if (res.status === 429) throw new Error(`${own ? 'Your' : 'The shared'} relay is busy. Try again in a minute.`);
   if (res.status === 415) throw new Error("That address isn't a feed, or a page that links to one.");
   if (res.status === 413) throw new Error('That feed is too big.');
-  if (res.status === 404) throw new Error('Nothing was found at that address (404). The feed may have moved or closed.');
+  if (res.status === 404) throw Object.assign(new Error('Nothing was found at that address (404). The feed may have moved or closed.'), { gone: true });
   if (!res.ok) {
     // The relay says what the feed's site answered.
     const site = Number(/site answered HTTP (\d+)/.exec(await res.text().catch(() => ''))?.[1]);
     if (/(^|\.)google\.com$/.test(host(url)) && [403, 429, 503].includes(site)) throw new Error('Google blocks requests from relays, so this Google feed can\'t be read here.');
-    if (site === 404 || site === 410) throw new Error(`The feed is gone (HTTP ${site}). The site may have moved or closed it.`);
+    if (site === 404 || site === 410) throw Object.assign(new Error(`The feed is gone (HTTP ${site}). The site may have moved or closed it.`), { gone: true });
     if (site === 401 || site === 403) throw new Error(`The site refuses automated readers (HTTP ${site}).`);
     if (site === 429) throw new Error('The site is limiting requests (HTTP 429). It will be tried again later.');
+    // 52x are Cloudflare's codes for a site that refuses or can't be reached from cloud servers.
+    if ([520, 521, 522, 523, 525, 526, 530].includes(site)) throw new Error(`The site refuses requests from cloud servers, so the relay can't read it (HTTP ${site}). It may be blocked for good; it will be tried again daily.`);
     if (site >= 500) throw new Error(`The site is having problems (HTTP ${site}). It will be tried again later.`);
     if (site) throw new Error(`The site answered HTTP ${site}.`);
     throw new Error(`The feed couldn't be fetched (HTTP ${res.status}).`);
@@ -658,6 +666,45 @@ function fetchAddress(url) {
   return url;
 }
 
+/** Sites that moved without leaving a forwarding address. [old address pattern, new address] */
+const KNOWN_MOVES = [
+  [/^https?:\/\/(www\.)?tasnimnews\.com\/en\//i, 'https://www.tasnimnews.ir/en/rss/feed/0/0/0/0/AllStories'],
+  [/^https?:\/\/(www\.)?panarmenian\.net\/(stickers\/news\/news_eng|eng\/)/i, 'https://www.pan.am/en/newsfeed/rss'],
+  [/^https?:\/\/english\.aljazeera\.net\//i, 'https://www.aljazeera.com/xml/rss/all.xml'],
+];
+
+/**
+ * A gone feed's new address: the page its old address now shows may link to
+ * it, a known move, or the usual feed paths on the same site (tried at most
+ * once a week per feed, to spare the relay). '' if none.
+ */
+async function findNewAddress(feed, answer) {
+  const tryUrl = async (url) => {
+    try {
+      const t = await fetchFeedText(url);
+      if (parseFeedXML(t, url, 'x')) return url;
+      const linked = /^\s*\{/.test(t) ? JSON.parse(t).feeds?.[0] : discoverFeed(t, url);
+      if (linked && linked !== url) { const t2 = await fetchFeedText(linked); if (parseFeedXML(t2, linked, 'x')) return linked; }
+    } catch { /* not there */ }
+    return '';
+  };
+  // The old address now shows a page that says where its feed is.
+  if (answer && /^\s*\{/.test(answer)) {
+    try { const linked = JSON.parse(answer).feeds?.[0]; if (linked) { const ok = await tryUrl(linked); if (ok) return ok; } } catch { /* not JSON */ }
+  }
+  for (const [re, to] of KNOWN_MOVES) if (re.test(feed.url)) { const ok = await tryUrl(to); if (ok) return ok; }
+  const live = liveSub(feed.url) || feed;
+  if (live.probedAt && Date.now() - live.probedAt < 7 * 864e5) return '';
+  live.probedAt = Date.now();
+  let u;
+  try { u = new URL(feed.url); } catch { return ''; }
+  const lang = /^\/(en|eng|english)(\/|$)/i.exec(u.pathname)?.[1];
+  const paths = [...new Set([...(lang ? [`/${lang}/rss`, `/${lang}/feed`] : []), '/rss', '/feed', '/rss.xml', '/feed.xml', '/atom.xml', '/index.xml'])];
+  if (live.site) { const ok = await tryUrl(live.site); if (ok) return ok; }
+  for (const path of paths) { const ok = await tryUrl(u.origin + path); if (ok) return ok; }
+  return '';
+}
+
 /** The search words of a Google News search feed (old Google Reader-era or current address), else ''. */
 function googleNewsQuery(url) {
   try {
@@ -747,24 +794,37 @@ async function fetchFeedTextRetry(url, opts) {
 
 async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   let via = '';
+  let movedTo = '';
   const q = googleNewsQuery(feed.url);
+  // A feed found at a new address is read from there (its identity stays the same).
+  const address = feed.fetchUrl || fetchAddress(feed.url);
   if (xml == null) {
     try {
-      xml = await fetchFeedTextRetry(fetchAddress(feed.url), { feed });
+      xml = await fetchFeedTextRetry(address, { feed });
     } catch (e) {
-      // Google blocks relays: a Google News search comes from Bing News instead.
-      if (!q) throw e;
-      xml = await fetchFeedTextRetry(newsSearchUrl(q));
-      via = 'Bing News';
+      if (q) {
+        // Google blocks relays: a Google News search comes from Bing News instead.
+        xml = await fetchFeedTextRetry(newsSearchUrl(q));
+        via = 'Bing News';
+      } else if (e.gone || KNOWN_MOVES.some(([re]) => re.test(feed.url))) {
+        movedTo = await findNewAddress(feed);
+        if (!movedTo) throw new Error(`${e.message} No new address could be found on the site.`);
+        xml = await fetchFeedText(movedTo);
+      } else throw e;
     }
   }
   let parsed = parseFeedXML(xml, feed.url, feed.id);
+  // The address now shows a web page instead of the feed: look for where it went.
+  if (!parsed && !q && !movedTo) {
+    movedTo = await findNewAddress(feed, xml);
+    if (movedTo) parsed = parseFeedXML(await fetchFeedText(movedTo), feed.url, feed.id);
+  }
   // Google sometimes answers with an empty list (or a page that isn't a feed): ask Bing too.
   if (q && !via && (!parsed || !parsed.items.length)) {
     const bing = parseFeedXML(await fetchFeedTextRetry(newsSearchUrl(q)), feed.url, feed.id);
     if (bing?.items.length) { parsed = { ...bing, title: parsed?.title || bing.title }; via = 'Bing News'; }
   }
-  if (!parsed) throw new Error('Not an RSS or Atom feed');
+  if (!parsed) throw new Error(movedTo === '' && !q ? "This address now shows a web page, not a feed, and no new address could be found on the site." : 'Not an RSS or Atom feed');
   const target = adding ? feed : liveSub(feed.url);
   if (!target) return parsed;
   const old = new Map((S.ownItems[target.id] || []).map((i) => [i.id, i]));
@@ -793,6 +853,7 @@ async function fetchOwnFeed(feed, xml, { adding = false } = {}) {
   target.error = '';
   delete target.failSince;
   if (via) target.via = via; else delete target.via;
+  if (movedTo) target.fetchUrl = movedTo;
   if ('direct' in feed) target.direct = feed.direct;
   if (!adding) { saveOwnFeed(target.id); saveSubs(); }
   return parsed;
@@ -1294,6 +1355,7 @@ function headerSub() {
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);
     if (f?.error) return `⚠ Couldn't fetch this feed${f.failSince ? ` (failing for ${agoText(f.failSince).replace(' ago', '')})` : ' last time'}: ${f.error}`;
+    if (f?.fetchUrl && !f.error) return `${unread} unread · This feed moved; it's now read from ${host(f.fetchUrl)}.`;
     if (f?.via) return `${unread} unread · Google News can't be read through the relay, so this search comes from ${f.via}.`;
   }
   return `${unread} unread${all.length !== unread ? ` of ${all.length}` : ''}`;
@@ -1309,7 +1371,7 @@ function renderHeader() {
     <div class="vh-title">
       <h1>${feed ? avatar(feed, true) : ''}${esc(viewTitle())}</h1>
       <p class="sub">${esc(headerSub())}</p>
-      ${feed ? `<p class="feed-addr"><span title="This feed's address">${esc(feed.url)}</span>${feed.via ? ` <span class="muted">· from ${esc(feed.via)}</span>` : ''} <button class="linkish" data-act="copyaddr">Copy</button></p>` : ''}
+      ${feed ? `<p class="feed-addr"><span title="This feed's address">${esc(feed.url)}</span>${feed.fetchUrl ? ` <span class="muted">→ now ${esc(feed.fetchUrl)}</span>` : ''}${feed.via ? ` <span class="muted">· from ${esc(feed.via)}</span>` : ''} <button class="linkish" data-act="copyaddr">Copy</button></p>` : ''}
     </div>
     <div class="vh-actions">
       ${filterable ? `<div class="seg" role="group" aria-label="Show"><button data-act="unread" class="${S.settings.unreadOnly ? 'on' : ''}">Unread</button><button data-act="allitems" class="${S.settings.unreadOnly ? '' : 'on'}">All</button></div>` : ''}
@@ -1838,7 +1900,7 @@ async function importOPML(file) {
   const found = [];
   for (const o of doc.querySelectorAll('outline[xmlUrl]')) {
     const parent = o.parentElement?.closest('outline:not([xmlUrl])');
-    found.push({ url: o.getAttribute('xmlUrl'), title: o.getAttribute('title') || o.getAttribute('text') || host(o.getAttribute('xmlUrl')), folder: parent?.getAttribute('title') || parent?.getAttribute('text') || '' });
+    found.push({ url: o.getAttribute('xmlUrl'), site: safeUrl(o.getAttribute('htmlUrl') || ''), title: o.getAttribute('title') || o.getAttribute('text') || host(o.getAttribute('xmlUrl')), folder: parent?.getAttribute('title') || parent?.getAttribute('text') || '' });
   }
   // One entry per address with all its folders (Feedly lists a feed once per folder it's in).
   const byUrl = new Map();
@@ -1854,10 +1916,10 @@ async function importOPML(file) {
   for (const f of byUrl.values()) {
     const existing = S.subs.find((s) => s.url === f.url);
     // A feed you already have joins any folders it's in in the file.
-    if (existing) { if (addFolders(existing, f.folders)) foldersAdded++; continue; }
+    if (existing) { if (addFolders(existing, f.folders)) foldersAdded++; if (!existing.site && f.site) existing.site = f.site; continue; }
     const c = catalog.get(f.url);
     const [folder, ...more] = f.folders;
-    const sub = c ? { id: c.id, url: c.url, title: c.title, folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder, own: true, site: '' };
+    const sub = c ? { id: c.id, url: c.url, title: c.title, folder } : { id: 'L' + hash(f.url), url: f.url, title: f.title, titleSet: true, folder, own: true, site: f.site || '' };
     if (more.length) sub.folders = more.filter(Boolean);
     S.subs.push(sub);
     fresh.push(f);
