@@ -33,6 +33,10 @@ jobs:
           cache: npm
 
       - run: npm ci --no-audit --no-fund
+        env:
+          # Skip onnxruntime's optional GPU (CUDA) download; the CPU build it ships is all we use.
+          # That download from nuget.org timing out failed an update.
+          ONNXRUNTIME_NODE_INSTALL: skip
 
       - name: Cache the AI model
         uses: actions/cache@v4
