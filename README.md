@@ -26,7 +26,14 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
 - **News searches:** type words instead of an address in ＋ Subscribe (for example `tbilisi`) to follow a news search for them (Bing News RSS). Google Reader-era Google News search feeds in an OPML import keep working: Google blocks relays, so the same search comes from Bing News (also when Google answers with nothing), and the feed page shows its address and says where results come from. All Google News search formats are recognised: `?q=…` (Google Reader-era and current) and `/search/section/q/…`. Search words are passed as they are: quotes ("exact phrase") and -minus work as usual. Bing's RSS returns nothing for OR, so a search with OR runs one search per term and merges the results (each article once).
 - **Moved feeds are found automatically:** when a feed is gone (404) or its address now shows a web page, the reader follows the page to the feed it advertises, checks a short list of known moves (sites that changed domain), and tries the usual feed paths on the site (`/rss`, `/feed`, `/rss.xml`, …, at most weekly per feed). The subscription keeps its read and starred marks; its page says where it's now read from.
-- **Broken feeds:** each one says why (gone, refuses automated readers, site down) and has **Try again**. Feeds that are gone for good (no new address found, a YouTube channel with no feed) or failing for over a week move to **📦 Retired feeds** at the bottom of the sidebar and aren't fetched any more. There you choose per feed: **Keep trying** (back in its folders, tried daily, not retired again) or **Unsubscribe**, or **Delete all retired feeds**.
+- **Dead or alive: every failing feed gets a decision.** Each failure is sorted, and only dead feeds are retired:
+  - **Gone** (404/410, a closed YouTube channel) with no new address found: retired once it has stayed gone for a day.
+  - **No longer a feed** (the address now shows a web page, and no feed was found on the site): retired after 3 days.
+  - **Site down** (5xx, timeouts) or **blocked by the site** (401/403/429): left alone and tried again (hourly, then every 6 hours, then daily); retired only after a month without ever working.
+  - **Relay problems** (busy, unreachable) never count against a feed.
+  - **Quiet** feeds (they work, but nothing new in 90+ days) are left alone.
+
+  Before a feed is judged gone, the reader looks for where it went: the page at its old address, the same address over https or with/without www, the site's home page, and the usual feed paths. **🩺 Feed health** (at the bottom of the sidebar, or `Ctrl`+`K`) lists every feed having trouble, what's wrong, and when it will be decided; **Check all feeds now** fetches everything at once. Retired feeds sit in **📦 Retired feeds**: **Keep trying** brings one back (tried daily, never retired again), or unsubscribe.
 - **🕵️ Investigations:** dig into a subject with an AI assistant in a side panel. Start one with **🕵️ Investigate** on a search, an AI topic or a news-search feed, or **🕵️ Dig deeper** on an article.
   - Ask anything and keep asking: the assistant reads the articles in your reader about it (cited as [1], [2]…) and remembers the conversation. Quick questions: *What's X saying?*, *YouTube videos*, *Timeline*, *Who & what*, *Where sources disagree*, *Still unknown*.
   - **With a Grok (xAI) key it searches X and the web live** (xAI's `x_search` and `web_search` tools), and lists every post, page and video it used. *YouTube videos* searches youtube.com; videos play in the panel from YouTube's no-cookie player when you press play. Without a Grok key, your chosen assistant answers from your articles.
@@ -216,7 +223,7 @@ Most websites don't let web pages read their feeds (CORS). For those, Sala Reade
 - **No relay**: only the catalog, plus feeds whose sites allow web pages to read them.
 
 The Worker is built to be shared safely:
-- **Feeds only.** It returns a response only if it's RSS or Atom. Given a web page, it returns just the feed links on it, never the page, so it can't be used as a general proxy.
+- **Feeds only.** It returns a response only if it's RSS or Atom. Sites that turn away anything that doesn't look like a browser get one more try with a browser-style user agent (still naming Sala Reader). Given a web page, it returns just the feed links on it, never the page, so it can't be used as a general proxy.
 - **Full article** (`?mode=article`): for an article page it returns only the article's text blocks and picture addresses as JSON, never the page's markup or scripts.
 - **Rate limit:** 60 requests a minute per visitor.
 - **Cache:** 10 minutes per feed, so many readers of one feed cost one fetch.

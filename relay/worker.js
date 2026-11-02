@@ -154,19 +154,22 @@ export default {
     if (cached) return reply(200, await cached.text(), { 'Content-Type': 'application/xml; charset=utf-8', 'X-Relay-Kind': 'feed' });
 
     // Follow redirects one at a time, checking every address on the way.
+    // Only a generic agent is sent: nothing about the person reading is passed on.
+    // Some sites turn away anything that doesn't look like a browser; for those
+    // the request is tried once more with a browser-style agent (still naming Sala Reader).
+    const AGENTS = ['SalaReader/1.0 (+https://reader.sala.company)', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 SalaReader/1.0'];
+    const get = (url, agent) => fetch(url, {
+      redirect: 'manual',
+      cf: { cacheTtl: 0 },
+      headers: { 'User-Agent': agent, Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.5', 'Accept-Language': 'en,*;q=0.5' },
+    });
     let res;
+    let agent = AGENTS[0];
     for (let hop = 0; ; hop++) {
       if (!isPublic(target)) return reply(400, 'Only public http(s) addresses.');
       try {
-        res = await fetch(target, {
-          redirect: 'manual',
-          cf: { cacheTtl: 0 },
-          headers: {
-            // Only a generic agent: nothing about the person reading is passed on.
-            'User-Agent': 'SalaReader/1.0 (+https://reader.sala.company)',
-            Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.5',
-          },
-        });
+        res = await get(target, agent);
+        if ([401, 403, 406, 429, 503].includes(res.status) && agent === AGENTS[0]) { agent = AGENTS[1]; res = await get(target, agent); }
       } catch {
         return reply(502, "Couldn't reach that site.");
       }
