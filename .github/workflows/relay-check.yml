@@ -49,6 +49,7 @@ jobs:
             echo "URL    $u"
             echo "  direct: $d :: $(head -c 120 /tmp/d | tr '\n' ' ')"
             echo "  relay:  $r :: $(head -c 160 /tmp/r | tr '\n' ' ')"
+            echo "  items in relay answer: $(grep -o '<item>\|<item \|<entry>\|<entry ' /tmp/r | wc -l)"
             # How the first items identify themselves (guid / link), twice, to spot ids that change.
             for k in 1 2; do
               curl -s -L --max-time 30 -A "SalaReader/1.0 (+https://reader.sala.company)" "$u" > /tmp/r$k || true; sleep 2
