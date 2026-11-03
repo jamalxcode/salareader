@@ -786,3 +786,10 @@ dialog h4.sub-h { margin: 14px 0 2px; font-size: 13px; }
 .nav-note.warn { color: var(--c-amber-fg, #8a5a00); font-weight: 600; }
 dialog.pass-sheet { width: min(440px, calc(100vw - 32px)); }
 .aa-pop .seg { --h-bg: var(--c-indigo-bg); --h-fg: var(--c-indigo-fg); }
+
+/* Investigations: a collapsible section. */
+.nav-section.inv-section { justify-content: flex-start; gap: 2px; margin-left: 2px; }
+.nav-section.inv-section .twisty { width: 24px; height: 24px; padding: 0; margin: 0; }
+.nav-section.inv-section .twisty svg { width: 14px; height: 14px; }
+.nav-section.inv-section .group-name { flex: 1; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; }
+.nav-section.inv-section .count { font-size: 12px; letter-spacing: 0; text-transform: none; }

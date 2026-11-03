@@ -313,5 +313,14 @@
       "header offers the AI order: .*Show them",
       "after Show them: true"
     ]
+  },
+  "t43.cjs": {
+    "name": "Investigations: news first, caught-up ones drop, the section collapses",
+    "expect": [
+      "after reading the startup one: \\[ 'Climate[^']*:[1-9]\\d*', '[^']*:0' \\]",
+      "collapsed: rows visible false",
+      "still collapsed after reload: true",
+      "expanded again: true"
+    ]
   }
 }

@@ -2989,10 +2989,17 @@ function invAction(act, btn) {
 /** Sidebar rows: each investigation with the count of new articles since you last looked. */
 function invSidebarHTML(active, count) {
   if (!S.invs?.length) return '';
-  return `<div class="nav-section"><span>Investigations</span></div>` + S.invs.map((inv) => {
-    const n = S.invOpen === inv.id ? 0 : invNew(inv).length;
-    return `<a class="nav-item inv${S.invOpen === inv.id ? ' active' : ''}" data-hue="${hueOf('i' + inv.id)}" href="#" data-inv="${esc(inv.id)}"><span class="ico">🕵️</span><span class="name">${esc(inv.name)}</span>${inv.follow?.x ? '<span class="muted" title="Watching X">𝕏</span>' : ''}${count(n)}</a>`;
-  }).join('');
+  // Unread new articles in each (since you last opened it); the ones with news come first,
+  // the newest news on top, and ones you're caught up on drop below.
+  const rows = S.invs.map((inv) => {
+    const fresh = S.invOpen === inv.id ? [] : invNew(inv).filter((it) => !isRead(it.id));
+    return { inv, n: fresh.length, latest: fresh.reduce((m, it) => Math.max(m, it.d), 0) };
+  }).sort((a, b) => (b.n > 0) - (a.n > 0) || b.latest - a.latest || (b.inv.lastOpened || b.inv.created || 0) - (a.inv.lastOpened || a.inv.created || 0));
+  const total = rows.reduce((t, r) => t + r.n, 0);
+  const closed = folderClosed('__invs');
+  return `<div class="folder inv-group${closed ? ' closed' : ''}">
+    <div class="nav-section inv-section"><button class="twisty" data-folder="__invs" aria-expanded="${!closed}" aria-label="${closed ? 'Expand' : 'Collapse'} investigations"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><button class="linkish group-name" data-folder-toggle="__invs">Investigations</button>${closed ? count(total) : ''}</div>
+    <div class="folder-feeds">${rows.map(({ inv, n }) => `<a class="nav-item inv${S.invOpen === inv.id ? ' active' : ''}" data-hue="${hueOf('i' + inv.id)}" href="#" data-inv="${esc(inv.id)}"><span class="ico">🕵️</span><span class="name">${esc(inv.name)}</span>${inv.follow?.x ? '<span class="muted" title="Watching X">𝕏</span>' : ''}${count(n)}</a>`).join('')}</div></div>`;
 }
 
 // ---------- fun ----------
