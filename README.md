@@ -6,7 +6,7 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 
 ## What it does
 
-- **Reader layout:** subscriptions in folders with unread counts, All items, Starred, a list view and an expanded view, and Mark all as read.
+- **Reader layout:** subscriptions in folders with unread counts, All items, Starred, a list view and an expanded view, and Mark all as read. Like Google Reader, the sidebar hides feeds with nothing unread, feeds that can't be read (failing or retired; see 🩺 Feed health), and folders left empty by that; **Show all** at the Subscriptions heading (or `Ctrl`+`K`) brings them back. The feed you're reading always stays listed.
 - **Keyboard first:** `j`/`k` next/previous, `o` open, `s` star, `m` read/unread, `v` open original, `Shift`+`A` mark all read, `/` search, `g h`/`g a`/`g s` to jump. Press `?` for the full list.
 - **✨ AI search:** search by meaning, so “cheap electric cars” also finds “EV prices drop below $25k”. A small AI model runs in your browser, so it's free and private. ⚙ Settings → *Languages* picks it: **English** (all-MiniLM-L6-v2, about 25 MB, the default) or **Multilingual** (paraphrase-multilingual-MiniLM-L12-v2, about 120 MB, 50+ languages including Arabic, Persian, Russian and Armenian), which matches by meaning across languages, so an English topic also finds Arabic articles on the same story. The catalog has search data for both; your own feeds and topics are worked out again for the new model in the background.
 - **✨ AI topics:** follow a subject across every feed, like Feedly's Leo. Each topic gets its own unread count in the sidebar.

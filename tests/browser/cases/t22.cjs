@@ -20,7 +20,7 @@ const rss = (title, links) => `<?xml version="1.0"?><rss version="2.0"><channel>
     return u.startsWith('http://localhost') ? r.continue() : r.abort();
   });
   const p = await ctx.newPage(); p.on('pageerror', (e) => errs.push(e.message)); p.on('dialog', (d) => d.accept());
-  await p.goto('http://localhost:8770/?debug'); await p.waitForSelector('.hero'); await p.waitForTimeout(800);
+  await p.goto('http://localhost:8770/?debug'); await p.waitForSelector('.hero'); await p.waitForTimeout(800); await p.keyboard.press('Control+k'); await p.keyboard.type('show all feeds'); await p.keyboard.press('Enter'); await p.waitForTimeout(1500); // this test needs every feed in the sidebar
   const opml = `<?xml version="1.0"?><opml version="1.0"><body><outline text="Crypto">
     <outline type="rss" text="&quot;bitcoin OR blockchain OR cryptocurrency&quot; - Google News" xmlUrl="http://news.google.com/news?hl=en&amp;gl=us&amp;q=bitcoin%20OR%20blockchain%20OR%20cryptocurrency&amp;um=1&amp;ie=UTF-8&amp;output=rss"/>
     <outline type="rss" text="BitcoinNews.com" xmlUrl="http://www.bitcoinnews.com/rss"/></outline></body></opml>`;

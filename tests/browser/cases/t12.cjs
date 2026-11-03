@@ -20,7 +20,7 @@ const bingRss = (q) => `<?xml version="1.0"?><rss version="2.0"><channel><title>
     return u.startsWith('http://localhost') ? r.continue() : r.abort();
   });
   const p = await ctx.newPage(); p.on('pageerror', (e) => errs.push(e.message)); p.on('dialog', (d) => d.accept());
-  await p.goto('http://localhost:8770/'); await p.waitForSelector('.hero');
+  await p.goto('http://localhost:8770/'); await p.waitForSelector('.hero'); await p.keyboard.press('Control+k'); await p.keyboard.type('show all feeds'); await p.keyboard.press('Enter'); await p.waitForTimeout(1500); // this test needs every feed in the sidebar
   // 1. Words in Subscribe -> news search.
   await p.click('#addBtn'); await p.fill('#addUrl', 'tbilisi'); await p.press('#addUrl', 'Enter');
   await p.waitForFunction(() => location.hash.startsWith('#/feed/L'), null, { timeout: 15000 });

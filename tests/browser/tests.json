@@ -322,5 +322,16 @@
       "still collapsed after reload: true",
       "expanded again: true"
     ]
+  },
+  "t44.cjs": {
+    "name": "Sidebar hides read and unreadable feeds; Show all brings them back",
+    "expect": [
+      "shown: \\[[^\\]]*'UA picky feed'",
+      "switch: Show all \\(\\d+ hidden\\)",
+      "read Verge, still shown while open: true",
+      "after leaving it: false",
+      "has Verge: true \\| has failing: true",
+      "switch now: Hide read"
+    ]
   }
 }

@@ -9,7 +9,7 @@ const T = process.argv[2];
     if (u.startsWith('https://salareader-relay.jamal-akuna-matata.workers.dev')) return r.fulfill({ response: await r.fetch({ url: u.replace('https://salareader-relay.jamal-akuna-matata.workers.dev', 'http://localhost:8902') }) });
     return u.startsWith('http://localhost') ? r.continue() : r.abort();
   });
-  await p.goto('http://localhost:8770/?debug'); await p.waitForSelector('.hero');
+  await p.goto('http://localhost:8770/?debug'); await p.waitForSelector('.hero'); await p.keyboard.press('Control+k'); await p.keyboard.type('show all feeds'); await p.keyboard.press('Enter'); await p.waitForTimeout(1500); // this test needs every feed in the sidebar
   await p.setInputFiles('#opmlFile', T + '/big.opml');
   await p.waitForFunction(() => { const own = (window.__salareader.subs || []).filter((s) => s.own); return own.length > 60 && own.every((s) => s.ok || s.error); }, null, { timeout: 180000 });
   await p.waitForTimeout(2000);

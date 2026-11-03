@@ -793,3 +793,5 @@ dialog.pass-sheet { width: min(440px, calc(100vw - 32px)); }
 .nav-section.inv-section .twisty svg { width: 14px; height: 14px; }
 .nav-section.inv-section .group-name { flex: 1; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; }
 .nav-section.inv-section .count { font-size: 12px; letter-spacing: 0; text-transform: none; }
+.subs-section .mini-link { border: 0; background: none; padding: 0 2px; font: inherit; font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 500; color: var(--accent); cursor: pointer; }
+.subs-section .mini-link:hover { text-decoration: underline; }

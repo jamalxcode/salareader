@@ -1842,20 +1842,33 @@ function renderSidebar() {
     html += `<a class="nav-item${active('topic', t.id)}" data-hue="${hueOf('t' + t.id)}" href="#/topic/${t.id}"><span class="ico">✨</span><span class="name">${esc(t.name)}</span>${n}</a>`;
   }
   html += invSidebarHTML(active, count);
-  html += `<div class="nav-section"><span>Subscriptions</span></div>`;
+  // Like Google Reader: feeds with nothing unread, and feeds that can't be read, are hidden
+  // (and folders left empty by that) unless "Show all" is on. The open feed or folder always shows.
+  const showAll = !!S.settings.showAllFeeds;
+  const unreadable = (f) => f.retired || (f.error && !f.relayIssue);
+  const visible = (f) => showAll || active('feed', f.id) || (!unreadable(f) && (unreadByFeed.get(f.id) || 0) > 0);
+
+  const shownFolders = [];
   const names = [...folders.keys()].sort((a, b) => (a === RETIRED) - (b === RETIRED) || (a === '') - (b === '') || a.localeCompare(b));
   for (const name of names) {
-    const list = folders.get(name).sort((a, b) => a.title.localeCompare(b.title));
+    const all = folders.get(name).sort((a, b) => a.title.localeCompare(b.title));
+    const list = all.filter(visible);
+    if (list.length || active('folder', name)) shownFolders.push([name, list]);
+  }
+  const hiddenFeeds = showAll ? 0 : new Set(S.feeds.filter((f) => !visible(f)).map((f) => f.id)).size;
+  html += `<div class="nav-section subs-section"><span>Subscriptions</span>${hiddenFeeds || showAll ? `<button class="mini-link" data-act="toggleallfeeds" title="${showAll ? 'Hide feeds with nothing unread, and feeds that can\'t be read' : `Show the ${hiddenFeeds} feeds with nothing unread or that can\'t be read`}">${showAll ? 'Hide read' : `Show all (${hiddenFeeds} hidden)`}</button>` : ''}</div>`;
+  for (const [name, list] of shownFolders) {
     const feedRow = (f) => `<a class="nav-item feed${active('feed', f.id)}${f.error && !f.relayIssue ? ' broken' : ''}" href="#/feed/${f.id}" draggable="true" data-feed="${esc(f.id)}" data-from="${esc(name)}" title="${esc(f.error && !f.relayIssue ? `Couldn't fetch: ${f.error}` : f.url)}">
         ${avatar(f)}<span class="name">${esc(f.title)}</span>${f.error && !f.relayIssue ? '<span class="warn" aria-label="Fetch problem">!</span>' : ''}${count(unreadByFeed.get(f.id) || 0)}</a>`;
     if (!name) { html += list.map(feedRow).join(''); continue; }
-    const n = list.reduce((s, f) => s + (uniqByFeed.get(f.id) || 0), 0);
+    const n = folders.get(name).reduce((s, f) => s + (uniqByFeed.get(f.id) || 0), 0);
     const closed = folderClosed(name);
     const retired = name === RETIRED;
     html += `<div class="folder${closed ? ' closed' : ''}${retired ? ' retired' : ''}">
-      <div class="nav-item folder-row${active('folder', name)}" data-drop="${esc(name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(retired ? 'Retired feeds' : name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">${retired ? '📦 Retired feeds' : `📁 ${esc(name)}`}</a>${retired ? `<span class="count muted">${list.length}</span>` : count(n)}</div>
+      <div class="nav-item folder-row${active('folder', name)}" data-drop="${esc(name)}"><button class="twisty" data-folder="${esc(name)}" aria-label="${closed ? 'Expand' : 'Collapse'} ${esc(retired ? 'Retired feeds' : name)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14l-7 9z" fill="currentColor"/></svg></button><a href="#/folder/${encodeURIComponent(name)}" class="name">${retired ? '📦 Retired feeds' : `📁 ${esc(name)}`}</a>${retired ? `<span class="count muted">${folders.get(name).length}</span>` : count(n)}</div>
       <div class="folder-feeds">${list.map(feedRow).join('')}</div></div>`;
   }
+  if (S.feeds.length && !shownFolders.length) html += `<p class="nav-note">All caught up. <button class="linkish" data-act="toggleallfeeds">Show all feeds</button></p>`;
   if (!S.feeds.length) html += `<p class="nav-note">No subscriptions yet. Press ＋ Subscribe to pick some.</p>`;
   if (S.ownProgress) html += `<p class="nav-note progress">⟳ Fetching your feeds… ${S.ownProgress.done} of ${S.ownProgress.total}</p>`;
   if (S.abPaused && abState()?.name) html += `<p class="nav-note warn">⏸ Automatic backup paused · <button class="linkish" data-act="resumebackup">Resume</button></p>`;
@@ -3349,6 +3362,7 @@ function wire() {
         }
         case 'keepfeed': keepFeed(btn.dataset.id); return;
         case 'checkfeeds': checkAllFeeds(); return;
+        case 'toggleallfeeds': S.settings.showAllFeeds = !S.settings.showAllFeeds; saveSettings(); renderSidebar(); return;
         case 'editfeed': openEditFeed(S.view.id); return;
         case 'renamefolder': openFolderDialog(S.view.id, 'rename'); return;
         case 'deletefolder': openFolderDialog(S.view.id, 'delete'); return;
@@ -4261,6 +4275,7 @@ function cmdItems(q) {
   act('Text and font settings…', openAa, 'Aa');
   for (const [id, name] of [['auto', 'match my system'], ['light', 'light'], ['dark', 'dark'], ['paper', 'paper'], ['classic', 'Classic 2008']]) act(`Theme: ${name}`, () => { S.settings.theme = id; saveSettings(); applyTheme(); applyReading(); }, '🎨');
   act('Show or hide the sidebar', toggleNav, '◧', 'u');
+  act(S.settings.showAllFeeds ? 'Sidebar: hide read and unreadable feeds' : 'Sidebar: show all feeds', () => { S.settings.showAllFeeds = !S.settings.showAllFeeds; saveSettings(); renderSidebar(); }, '☰');
   act('Settings', openSettings, '⚙');
   act('Keyboard shortcuts', () => $('#helpDialog').showModal(), '⌨', '?');
   act('Export backup', () => exportBackup(false), '💾');
