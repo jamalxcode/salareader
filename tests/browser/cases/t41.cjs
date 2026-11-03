@@ -16,6 +16,8 @@ const T = process.argv[2];
   // A refresh saves the plan for the worker.
   await p.evaluate(() => { for (const s of window.__salareader.subs) delete s.ok; }); await p.click('#refreshBtn'); await p.waitForTimeout(1000);
   await p.waitForFunction(() => !window.__salareader.ownProgress); await p.waitForTimeout(1500);
+  // The plan is written at the end of the refresh (slower machines: a moment later).
+  await p.waitForFunction(async () => { const r = await (await caches.open('salareader-prefetch')).match('/__prefetch-plan'); const pl = r && (await r.json()); return pl && pl.feeds.some((f) => f.direct); }, null, { timeout: 30000, polling: 500 }).catch(() => {});
   const plan = await p.evaluate(async () => { const r = await (await caches.open('salareader-prefetch')).match('/__prefetch-plan'); return r && (await r.json()); });
   console.log('eng sub:', await p.evaluate(() => JSON.stringify(window.__salareader.subs.filter((s) => s.url.includes('8767')).map(({ id, url, direct, ok, error }) => ({ url, direct, ok: !!ok, error })))));
   console.log('plan:', plan && { relay: plan.relay, feeds: plan.feeds.map((f) => f.url.replace('http://', '') + (f.direct ? ' (direct)' : '')) });
