@@ -643,6 +643,12 @@ body.inv-open .inv-panel, .inv-ask { background: var(--side); }
 #sidebar .nav-item[data-hue] .ico { width: 22px; height: 22px; border-radius: 6px; font-size: 13px; }
 #sidebar .nav-section { margin-top: 14px; font-size: 11px; }
 #sidebar .add-btn { margin-bottom: 8px; padding: 8px 16px; }
+/* Refresh sits right under Subscribe, quieter so Subscribe stays the main button. */
+#sidebar .refresh-side { display: block; margin-top: -2px; padding: 6px 16px; font-weight: 500; box-shadow: none; border: 1px solid var(--border); background: transparent; }
+#sidebar .refresh-side:hover:not(:disabled) { background: var(--nav-hover); }
+#sidebar .refresh-side:disabled { cursor: progress; opacity: 1; color: var(--text-2); }
+.refresh-side .spin-ico { display: inline-block; animation: spin 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .refresh-side .spin-ico { animation: none; } }
 body.inv-open .inv-panel { width: clamp(300px, 26vw, 400px); }
 main { padding: 0 20px 80px; }
 

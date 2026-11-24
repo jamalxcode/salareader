@@ -333,5 +333,13 @@
       "has Verge: true \\| has failing: true",
       "switch now: Hide read"
     ]
+  },
+  "t45.cjs": {
+    "name": "Refresh button under Subscribe reads every feed now",
+    "expect": [
+      "refresh button under Subscribe: true \\| label: ⟳ Refresh",
+      "while refreshing, disabled: true",
+      "feed read again: true \\| label after: ⟳ Refresh"
+    ]
   }
 }

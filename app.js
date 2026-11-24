@@ -1359,7 +1359,8 @@ function refreshOwnFeeds({ force = false, wait = false, includeRetired = false }
     const now = Date.now();
     const due = (S.subs || []).filter((s) => {
       if (!s.own || catalog.has(s.url) || (s.retired && !includeRetired)) return false;
-      return force || now >= nextFetchAt(s);
+      // force 'healthy' (Refresh): every working feed now; failing ones keep their retry schedule.
+      return force === true || (force === 'healthy' && !s.error) || now >= nextFetchAt(s);
     });
     if (!due.length || stopRefresh) return;
     // The feeds you read most come first, so the stories you care about arrive first.
@@ -1830,6 +1831,7 @@ function renderSidebar() {
 
   let html = `
     <button class="add-btn" id="addBtn">＋ Subscribe</button>
+    <button class="add-btn refresh-side" id="sideRefreshBtn" ${refreshing ? 'disabled' : ''} title="Read every feed now (r)">${refreshing ? `<span class="spin-ico" aria-hidden="true">⟳</span> ${S.ownProgress ? `Refreshing… ${S.ownProgress.done} of ${S.ownProgress.total}` : 'Refreshing…'}` : '⟳ Refresh'}</button>
     <a class="nav-item${active('home')}" href="#/home"><span class="ico">🏠</span>Home</a>
     <a class="nav-item${active('all')}" href="#/all"><span class="ico">📚</span><span class="name">All items</span>${count(total)}</a>
     <a class="nav-item${active('starred')}" href="#/starred"><span class="ico">⭐</span><span class="name">Starred</span>${nStar ? `<span class="count muted">${nStar}</span>` : ''}</a>
@@ -3293,6 +3295,7 @@ function wire() {
     const invRow = e.target.closest('[data-inv]');
     if (invRow) { e.preventDefault(); if (S.invOpen === invRow.dataset.inv) closeInvestigation(); else openInvestigation(invRow.dataset.inv); closeSidebar(); return; }
     if (e.target.closest('#addBtn')) openAdd();
+    if (e.target.closest('#sideRefreshBtn')) refresh();
     if (e.target.closest('#addTopicBtn, #addTopicBtn2')) openTopic();
   });
 
@@ -3778,23 +3781,38 @@ function openTopic(prefill = '') {
   closeSidebar();
 }
 
+/** True while a refresh you asked for runs (top bar ⟳, sidebar Refresh, r, pull to refresh). */
+let refreshing = false;
+
+/**
+ * Reloads the shared catalog and reads every working feed of your own now (not
+ * only the ones that are due; failing feeds keep their retry schedule), then
+ * says how many new articles came in.
+ */
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   const btn = $('#refreshBtn');
   btn.classList.add('spin');
+  renderSidebar();
   const before = S.index.updated;
+  const unreadBefore = totalUnread();
   const ok = await loadIndex(true);
-  refreshOwnFeeds(); // in the background: articles appear as feeds arrive
-  if (ok === false) {
-    btn.classList.remove('spin');
-    toast("Couldn't reach Sala Reader to refresh. Check your connection; your articles are still here.", 5000);
-    return;
+  if (ok !== false) {
+    S.vectorsState = 'none';
+    rebuild();
+    if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'home') refreshHome(); else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); } });
+    render();
   }
-  S.vectorsState = 'none';
-  rebuild();
-  if (S.topics.length) loadVectors().then(() => { renderSidebar(); if (S.view.type === 'home') refreshHome(); else if (S.view.type === 'topic') { renderHeaderCounts(); offerNew(); } });
-  render();
+  // Articles appear as each feed arrives; the sidebar button shows how far it got.
+  try { await refreshOwnFeeds({ force: 'healthy', wait: true }); } catch {}
+  refreshing = false;
   btn.classList.remove('spin');
-  toast(S.index.updated !== before ? 'Fresh articles loaded' : `Up to date (feeds updated ${agoText(S.index.updated)})`);
+  renderSidebar();
+  const fresh = Math.max(0, totalUnread() - unreadBefore);
+  if (ok === false) toast("Couldn't reach Sala Reader to refresh the shared feeds. Check your connection; your articles are still here.", 5000);
+  else if (fresh) toast(`${fresh} new article${fresh === 1 ? '' : 's'}`);
+  else toast(S.index.updated !== before ? 'Fresh articles loaded' : `Up to date (feeds updated ${agoText(S.index.updated)})`);
 }
 
 // ---------- desktop: reading pane ----------
