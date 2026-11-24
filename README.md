@@ -7,11 +7,11 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
 ## What it does
 
 - **Reader layout:** subscriptions in folders with unread counts, All items, Starred, a list view and an expanded view, and Mark all as read. Like Google Reader, the sidebar hides feeds with nothing unread, feeds that can't be read (failing or retired; see 🩺 Feed health), and folders left empty by that; **Show all** at the Subscriptions heading (or `Ctrl`+`K`) brings them back. The feed you're reading always stays listed. **⟳ Refresh**, right under ＋ Subscribe (or `r`, or ⟳ in the top bar), reads every working feed now and says how many new articles came in; failing feeds keep their retry schedule.
-- **Keyboard first:** `j`/`k` next/previous, `o` open, `s` star, `m` read/unread, `v` open original, `Shift`+`A` mark all read, `/` search, `g h`/`g a`/`g s` to jump. Press `?` for the full list.
+- **Keyboard first:** `j`/`k` next/previous, `o` open, `s` star, `m` read/unread, `v` open original, `Shift`+`A` mark all read, `/` search, `t` swipe round, `g h`/`g a`/`g s` to jump. Press `?` for the full list.
 - **✨ AI search:** search by meaning, so “cheap electric cars” also finds “EV prices drop below $25k”. A small AI model runs in your browser, so it's free and private. ⚙ Settings → *Languages* picks it: **English** (all-MiniLM-L6-v2, about 25 MB, the default) or **Multilingual** (paraphrase-multilingual-MiniLM-L12-v2, about 120 MB, 50+ languages including Arabic, Persian, Russian and Armenian), which matches by meaning across languages, so an English topic also finds Arabic articles on the same story. The catalog has search data for both; your own feeds and topics are worked out again for the new model in the background.
 - **✨ AI topics:** follow a subject across every feed, like Feedly's Leo. Each topic gets its own unread count in the sidebar.
 - **🔗 More like this** on every article, which also flags the same story covered by other feeds.
-- **✨ Summarize** and **✨ Brief me** (optional): pick an AI assistant in ⚙ Settings, the same six as [jamalterm](https://github.com/jamalxcode/jamalterm): **Claude, ChatGPT, DeepSeek, Grok, OpenRouter or Gemini**. It summarizes an article or writes a short briefing on any list, with numbered links to the stories. Switch assistants with `Alt`+`1`–`6`.
+- **✨ Summarize** and **✨ Brief me** (optional): pick an AI assistant in ⚙ Settings, the same six as [jamalterm](https://github.com/jamalxcode/jamalterm): **Claude, ChatGPT, DeepSeek, Grok, OpenRouter or Gemini**. It summarizes an article or writes a short briefing on any list, with numbered links to the stories (`Esc` or ✕ closes the briefing). Switch assistants with `Alt`+`1`–`6`.
   - Claude, ChatGPT, DeepSeek and Grok use an API key from their company. Gemini takes a free key from [aistudio.google.com](https://aistudio.google.com/apikey). OpenRouter has **Sign in with OpenRouter** (your browser approves and the key is saved) or a key.
   - The model is picked automatically: the newest general model your key can use, DeepSeek's `deepseek-v4-flash`, or OpenRouter's Auto Router. Claude defaults to Opus 5.5. Use **Show available models** to choose another.
   - Keys stay in your browser and are sent only to that assistant's API. Usage is billed to that API account; a ChatGPT Plus subscription doesn't cover it.
@@ -23,6 +23,13 @@ The old Google Reader, with the AI search Feedly has. It's a fast RSS reader wit
   - **Right-click menus** on articles (star, mark read, mark everything above or below as read, open or copy the link, dig deeper), feeds (refresh, edit, copy the address, share, unsubscribe), folders, topics, smart folders and investigations. Text and links inside an article keep the browser's own menu.
   - **Command palette** (`Ctrl`+`K` or `⌘`+`K`): type to go to any feed, folder, topic or investigation, or run any command (layout, sort, theme, text size, AI assistant, backup…). Typing anything else offers to search for it by meaning, investigate it, or follow it as a news search.
   - **Text size and font** (**Aa** in the top bar, or `+` and `−`): size, serif or sans-serif, line width and line spacing for articles, kept with your settings.
+- **🎯 For you:** your unread articles, best for you first. The reader learns on your device from what you open, star, keep and highlight (more like this) and what you skip (less like this): the feed, the headline's words and, once the AI search data is loaded, the meaning. Home shows the top picks. Right-click an article for 👍 *More like this* or 👎 *Less like this*. Nothing about it leaves your device.
+- **⚡ Swipe rounds** (`t`, or ⚡ on Home): 20 For you picks as cards. Swipe right (or `→`) to keep one for later, left (or `←`) to skip it (marked read), `↑` to read it now, `s` to star. Every swipe teaches For you. The round ends with your time (beat your best) and a **📌 Kept for later** list.
+- **🧵 Developing stories:** when several of your feeds cover the same news in the last two days, it becomes one story with a timeline of who reported what, when ("4 sources · 7 articles"). Matched by shared names and, with the AI search data, by meaning (across languages too). Mark a whole story read, or 🕵️ investigate it. The biggest three are on Home.
+- **🔇 Mute by meaning:** mute a subject (⚙ Settings → *Muted subjects*, or right-click an article → *Mute stories like this*) and articles about it disappear from All items, folders, smart folders, topics, For you and Home, even when they use other words: muting “crypto prices” also hides “Bitcoin tumbles 8%”. Search and Starred still find them, and each list says how many it hid, with **Show**.
+- **🖍 Highlights and notes:** select text in an article and press 🖍 *Highlight* or 📝 *Note*. Highlights come back when you reopen the article, are listed in **🖍 Highlights** (sidebar), go into backups, and export as a Markdown file.
+- **🧹 Tidy up:** after three weeks, Home lists feeds you've never opened anything from (but that keep posting), to unsubscribe in one go, keep, or ask later. Discover's *For you* row also suggests feeds matching what you open and star.
+- **📊 Your week and 🏅 achievements:** a weekly recap (from Home or `Ctrl`+`K`): articles read each day, compared with the week before, top feeds, topics and languages, when you read most, and your streak, saved as a picture to share if you like. Eighteen achievements to unlock (Night owl, Polyglot, Zen master, Speed run…), announced as you earn them. All worked out on your device.
 - **Fun bits:** a 🔥 reading streak, 🎲 Surprise me, confetti at inbox zero, and themes (Light, Dark, Paper and Classic 2008).
 - **News searches:** type words instead of an address in ＋ Subscribe (for example `tbilisi`) to follow a news search for them (Bing News RSS). Google Reader-era Google News search feeds in an OPML import keep working: Google blocks relays, so the same search comes from Bing News (also when Google answers with nothing), and the feed page shows its address and says where results come from. All Google News search formats are recognised: `?q=…` (Google Reader-era and current) and `/search/section/q/…`. Search words are passed as they are: quotes ("exact phrase") and -minus work as usual. Bing's RSS returns nothing for OR, so a search with OR runs one search per term and merges the results (each article once).
 - **Moved feeds are found automatically:** when a feed is gone (404) or its address now shows a web page, the reader follows the page to the feed it advertises, checks a short list of known moves (sites that changed domain), and tries the usual feed paths on the site (`/rss`, `/feed`, `/rss.xml`, …, at most weekly per feed). The subscription keeps its read and starred marks; its page says where it's now read from.
@@ -82,7 +89,7 @@ These are the rules Sala Reader is built to. Every feature has to fit them; a fe
 
 ## Privacy policy
 
-*Last updated 2 November 2026.*
+*Last updated 24 November 2026.*
 
 Sala Reader is a web app at reader.sala.company. This policy covers the app, the shared relay and the scheduled feed updates. In short: **Sala Reader does not collect, store, share or sell your personal data. Your reader lives on your device.**
 
@@ -92,6 +99,7 @@ Everything you do in Sala Reader is stored **only on your device**, in the brows
 
 - your subscriptions and folders, and anything you imported (OPML);
 - which articles you've read and starred (starred articles are kept even after they leave the feed);
+- what you opened, kept, skipped and highlighted, the words and feeds For you learned from it, your muted subjects, highlights and notes, achievements and a short history of the last weeks for the weekly recap;
 - AI topics, investigations and their conversations, and smart-folder results;
 - your settings, the relay you chose, and any AI API keys you entered;
 - the AI search model and article search data, cached so they aren't downloaded again;
@@ -187,6 +195,7 @@ manifest.webmanifest, icon-*.png   the installable app's name and icons
 ai.js               AI: the six assistants, Grok live search, the embedding worker pool
 embed-worker.js     runs the AI search model in a Web Worker, so the page never freezes
 smart.js            smart folders: language detection, topics and kinds
+extras.js           For you learning, developing stories, achievements, the recap picture
 feeds.json          the shared catalog
 directory.json      hand-picked feeds for ＋ Subscribe → Discover
 scripts/fetch.mjs   the scheduled feed fetch (catalog → data/)

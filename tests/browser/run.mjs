@@ -57,7 +57,7 @@ async function setup() {
   }
 }
 
-const SITE_FILES = /^\/(index\.html|style\.css|app\.js|ai\.js|smart\.js|embed-worker\.js|sw\.js|manifest\.webmanifest|icon[\w-]*\.(svg|png)|feeds\.json|directory\.json)$/;
+const SITE_FILES = /^\/(index\.html|style\.css|app\.js|ai\.js|extras\.js|smart\.js|embed-worker\.js|sw\.js|manifest\.webmanifest|icon[\w-]*\.(svg|png)|feeds\.json|directory\.json)$/;
 
 async function startServers() {
   const servers = [

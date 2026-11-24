@@ -2,8 +2,8 @@
 // Only this site's own files are handled, always from the network first (so
 // updates arrive straight away), with the last copy as the offline fallback.
 // Feeds, the relay, AI companies and every other site are never touched.
-const CACHE = 'salareader-v2';
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'ai.js', 'smart.js', 'embed-worker.js', 'icon.svg', 'manifest.webmanifest', 'feeds.json', 'directory.json'];
+const CACHE = 'salareader-v3';
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'ai.js', 'extras.js', 'smart.js', 'embed-worker.js', 'icon.svg', 'manifest.webmanifest', 'feeds.json', 'directory.json'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}).then(() => self.skipWaiting()));

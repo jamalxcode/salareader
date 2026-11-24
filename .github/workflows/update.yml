@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 20
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deploy_retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,11 +75,20 @@ jobs:
       - name: Assemble the site
         run: |
           mkdir _site
-          cp -r index.html style.css app.js ai.js embed-worker.js smart.js sw.js manifest.webmanifest icon.svg icon-192.png icon-512.png icon-maskable.png feeds.json directory.json CNAME .nojekyll data _site/
+          cp -r index.html style.css app.js ai.js extras.js embed-worker.js smart.js sw.js manifest.webmanifest icon.svg icon-192.png icon-512.png icon-maskable.png feeds.json directory.json CNAME .nojekyll data _site/
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+      # GitHub sometimes can't find the artifact it was just given ("No artifacts named
+      # github-pages"): wait a little and deploy again instead of failing the run.
       - id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: Wait before deploying again
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - id: deploy_retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4

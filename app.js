@@ -8,7 +8,8 @@
 // site or through your own relay (relay/worker.js). Backup → export/import
 // moves everything to another device.
 
-import { classify, smartInfo, wordCount, mediaKind, LANGS, TOPICS, META } from './smart.js';
+import { classify, smartInfo, wordCount, mediaKind, detectLang, LANGS, TOPICS, META } from './smart.js';
+import { newTaste, learn, tasteScore, clusterStories, BADGES, newBadges, drawRecap } from './extras.js';
 import { decodeVector, encodeVector, dot, embed as embedWith, embedText, EMBED_MODELS, askAI, askGrokLive, PROVIDERS, provider, listModels, startOpenRouterSignIn, finishOpenRouterSignIn } from './ai.js';
 
 const PAGE = 60;
@@ -217,6 +218,7 @@ const S = {
   subs: null,           // [{id, url, title, folder, own?, site?, error?, ok?}] (null until first run)
   ownItems: {},         // feedId -> items[] for feeds this page fetches itself (stored as own:<feedId>)
   read: {},             // id -> time read
+  taste: newTaste(), mutes: [], highlights: {}, log: [], kept: [], badges: {}, stats: {}, // For you, mutes, highlights, recap, achievements
   starred: {},          // id -> item copy (survives feed cleanup)
   topics: [],           // {id, name, query, qv: number[]}
   collapsed: {},
@@ -247,6 +249,7 @@ function loadState() {
   S.invs = store.get('investigations', []).map((x) => ({ ...x }));
   S.collapsed = store.get('collapsed', {});
   S.days = store.get('days', []);
+  loadExtras();
   S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
   // Earlier versions had only Claude.
   if (S.settings.claudeKey) S.settings.keys = { ...S.settings.keys, anthropic: S.settings.keys?.anthropic || S.settings.claudeKey };
@@ -333,6 +336,21 @@ function loadState() {
     } else {
       S.pendingOwn = moved; // added to the list when it's first made (loadIndex)
     }
+  }
+}
+/** For you, mutes, highlights, the recap and achievements (all on this device). */
+function loadExtras() {
+  S.taste = { ...newTaste(), ...store.get('taste', {}) };
+  S.mutes = store.get('mutes', []);
+  S.highlights = store.get('highlights', {});
+  S.log = store.get('log', []);
+  S.kept = store.get('kept', []);
+  S.badges = store.get('badges', {});
+  S.stats = store.get('stats', null);
+  if (!S.stats) {
+    // Counting starts now; stars you already have count.
+    S.stats = { since: Date.now(), opened: 0, starred: Object.keys(S.starred || {}).length };
+    store.set('stats', S.stats);
   }
 }
 // For diagnosing on your own device: open the reader with ?debug to inspect its state in the console.
@@ -532,7 +550,9 @@ function findTwins() {
     if (readAt) for (const id of g) if (!(id in S.read)) { S.read[id] = readAt; changed = true; }
   }
   if (changed) store.set('read', S.read);
-  S.uniq = S.dupHidden.size ? S.items.filter((i) => !S.dupHidden.has(i.id)) : S.items;
+  // Muted subjects are left out of every mixed view and count.
+  S.muted = mutedIds();
+  S.uniq = S.dupHidden.size || S.muted?.size ? S.items.filter((i) => !S.dupHidden.has(i.id) && !S.muted?.has(i.id)) : S.items;
 }
 const twinsOf = (id) => S.twinsOf?.get(id) || [id];
 
@@ -634,6 +654,8 @@ async function loadVectors() {
       S.vectorsState = S.vectors.size ? 'ready' : 'missing';
     }
     S.version++;
+    // Mutes by meaning need the vectors: hide what they catch now.
+    if (S.mutes?.some(muteVec)) { rebuild(); scheduleCounts(); }
   })();
   return S.vectorsPromise;
 }
@@ -843,6 +865,7 @@ async function showFullArticle(article, btn) {
     if (!fullArticles.has(it.id)) fullArticles.set(it.id, await fetchFullArticle(it));
     box.innerHTML = sanitize(fullArticles.get(it.id), safeUrl(it.l) || location.href);
     box.dataset.filled = '1';
+    applyHighlights(box, it.id);
     btn.dataset.state = 'full'; btn.textContent = '📄 Feed version';
   } catch (e) {
     btn.textContent = '📄 Full article';
@@ -1534,6 +1557,10 @@ function toggleStar(id) {
   if (S.starred[id]) delete S.starred[id];
   else {
     S.starred[id] = { ...it, starredAt: Date.now() };
+    teach(it, 3);
+    logEvent('s', it);
+    bump('starred');
+    checkBadges();
     // Keep the full text with the star, so it outlives the feed's own copy.
     if (!it.c) feedContent(it.f).then((m) => { if (S.starred[id] && m?.[id]) { S.starred[id].c = m[id]; store.set('starred', S.starred); } }).catch(() => {});
   }
@@ -1549,6 +1576,7 @@ function noteActivity() {
     S.days = S.days.slice(-400);
     store.set('days', S.days);
     renderStreak();
+    checkBadges();
   }
 }
 
@@ -1653,15 +1681,24 @@ function viewItems() {
     }
     case 'search': items = v.results || []; S.scores = v.scores || null; break;
     case 'smart': items = S.smart?.get(v.id) || []; break;
+    case 'foryou': items = forYou(); break;
+    case 'kept': items = S.kept.map((id) => S.byId.get(id)).filter(Boolean); break;
     default: items = [];
   }
   // Views that mix feeds show each story once.
   if (S.dupHidden?.size && !['feed', 'starred'].includes(v.type)) items = items.filter((i) => !S.dupHidden.has(i.id));
-  // Smart folders show only unread articles (and ones opened while you're there).
-  const showAll = v.type === 'starred' || v.type === 'search' || (v.type !== 'smart' && !S.settings.unreadOnly);
+  // Muted subjects are hidden (search and Starred still find them; "Show" brings them back).
+  S.mutedHere = 0;
+  if (S.muted?.size && !['starred', 'search'].includes(v.type)) {
+    const before = items.length;
+    if (!v.showMuted) items = items.filter((i) => !S.muted.has(i.id));
+    S.mutedHere = v.showMuted ? -1 : before - items.length;
+  }
+  // Smart folders and For you show only unread articles (and ones opened while you're there).
+  const showAll = v.type === 'starred' || v.type === 'search' || v.type === 'kept' || (!['smart', 'foryou'].includes(v.type) && !S.settings.unreadOnly);
   const shown = showAll ? items : items.filter((i) => !isRead(i.id) || v.keep?.has(i.id));
-  // Oldest first (search keeps best matches first).
-  return S.settings.sort === 'oldest' && v.type !== 'search' ? [...shown].sort((a, b) => a.d - b.d) : shown;
+  // Oldest first (search and For you keep the best first).
+  return S.settings.sort === 'oldest' && !['search', 'foryou'].includes(v.type) ? [...shown].sort((a, b) => a.d - b.d) : shown;
 }
 
 function viewTitle() {
@@ -1670,6 +1707,11 @@ function viewTitle() {
     case 'all': return 'All items';
     case 'starred': return 'Starred';
     case 'health': return '🩺 Feed health';
+    case 'foryou': return '🎯 For you';
+    case 'stories': return '🧵 Developing stories';
+    case 'highlights': return '🖍 Highlights';
+    case 'recap': return '📊 Your week in reading';
+    case 'kept': return '📌 Kept for later';
     case 'feed': return S.feedById.get(v.id)?.title || 'Feed';
     case 'folder': return v.id === RETIRED ? '📦 Retired feeds' : v.id || 'Unfiled';
     case 'topic': return '✨ ' + (S.topics.find((t) => t.id === v.id)?.name || 'Topic');
@@ -1711,7 +1753,7 @@ function route() {
   try { arg = decodeURIComponent(arg); } catch { /* a stray % typed in the address */ }
   const prevKey = JSON.stringify([S.view.type, S.view.id, S.view.q]);
   const prevKeep = S.view.keep;
-  if (type === 'all' || type === 'starred' || type === 'health') S.view = { type };
+  if (['all', 'starred', 'health', 'foryou', 'stories', 'highlights', 'recap', 'kept'].includes(type)) S.view = { type };
   else if (type === 'feed' || type === 'folder' || type === 'topic' || type === 'smart') S.view = { type, id: arg };
   else if (type === 'search' && arg) {
     if (S.view.type !== 'search' || S.view.q !== arg) { S.view = { type: 'search', q: arg }; runSearch(arg); }
@@ -1720,6 +1762,11 @@ function route() {
   S.view.keep = JSON.stringify([S.view.type, S.view.id, S.view.q]) === prevKey && prevKeep ? prevKeep : new Set();
   applyViewPrefs();
   $('#q').value = S.view.type === 'search' ? S.view.q : '';
+  // For you and stories work better with the AI search data (no model download: just the catalog's vectors).
+  if ((S.view.type === 'foryou' || S.view.type === 'stories') && S.vectorsState === 'none') {
+    const t = S.view.type;
+    loadVectors().then(() => { if (S.view.type === t && !document.querySelector('#list article.entry.open, #list details[open]')) render(); });
+  }
   S.cur = -1;
   closeSidebar();
   render();
@@ -1819,7 +1866,7 @@ function renderSidebar() {
   }
   const unreadByFeed = new Map();
   const uniqByFeed = new Map(); // for folder totals: a story in two of a folder's feeds counts once
-  for (const it of S.items) if (!isRead(it.id)) {
+  for (const it of S.items) if (!isRead(it.id) && !S.muted?.has(it.id)) {
     unreadByFeed.set(it.f, (unreadByFeed.get(it.f) || 0) + 1);
     if (!S.dupHidden?.has(it.id)) uniqByFeed.set(it.f, (uniqByFeed.get(it.f) || 0) + 1);
   }
@@ -1835,6 +1882,8 @@ function renderSidebar() {
     <a class="nav-item${active('home')}" href="#/home"><span class="ico">🏠</span>Home</a>
     <a class="nav-item${active('all')}" href="#/all"><span class="ico">📚</span><span class="name">All items</span>${count(total)}</a>
     <a class="nav-item${active('starred')}" href="#/starred"><span class="ico">⭐</span><span class="name">Starred</span>${nStar ? `<span class="count muted">${nStar}</span>` : ''}</a>
+    <a class="nav-item${active('foryou')}" href="#/foryou"><span class="ico">🎯</span><span class="name">For you</span></a>
+    ${extrasSidebarHTML(active, count)}
     ${smartSidebarHTML(active, count)}
     <div class="nav-section"><span>AI topics</span><button class="mini" id="addTopicBtn" title="New AI topic" aria-label="New AI topic">＋</button></div>`;
   if (!S.topics.length) html += `<button class="nav-empty" id="addTopicBtn2">Follow a topic across all feeds →</button>`;
@@ -1879,6 +1928,17 @@ function renderSidebar() {
   if (html !== S.sidebarHTML) { S.sidebarHTML = html; nav.innerHTML = html; }
 }
 
+/** Developing stories, highlights and the last swipe round's keepers, when there are any. */
+function extrasSidebarHTML(active, count) {
+  const st = storiesSoon();
+  const nStories = st ? st.filter((x) => storyUnread(x)).length : 0;
+  const nHl = highlightCount();
+  const kept = S.kept.filter((id) => S.byId.has(id) && !isRead(id)).length;
+  return (nStories || active('stories') ? `<a class="nav-item${active('stories')}" href="#/stories"><span class="ico">🧵</span><span class="name">Developing stories</span>${count(nStories)}</a>` : '')
+    + (kept || active('kept') ? `<a class="nav-item${active('kept')}" href="#/kept"><span class="ico">📌</span><span class="name">Kept for later</span>${count(kept)}</a>` : '')
+    + (nHl || active('highlights') ? `<a class="nav-item${active('highlights')}" href="#/highlights"><span class="ico">🖍</span><span class="name">Highlights</span>${nHl ? `<span class="count muted">${nHl}</span>` : ''}</a>` : '');
+}
+
 // Each topic's colour (see [data-hue] in style.css).
 const HUES = ['blue', 'purple', 'green', 'orange', 'teal', 'pink', 'indigo', 'amber', 'red'];
 const SMART_HUES = {
@@ -1915,7 +1975,8 @@ function smartSidebarHTML(active, count) {
 }
 
 // The header line, plus "Show them" when a search found more matches while you read.
-const headerSubHTML = () => (S.view.type === 'health' ? esc(healthCounts().line) : esc(headerSub())) + (S.view.pending ? ' · <button class="linkish" data-act="showpending">Show them</button>' : '');
+const headerSubHTML = () => (S.view.type === 'health' ? esc(healthCounts().line) : esc(headerSub())) + (S.view.pending ? ' · <button class="linkish" data-act="showpending">Show them</button>' : '')
+  + (S.mutedHere > 0 ? ` · 🔇 ${S.mutedHere} muted <button class="linkish" data-act="showmuted">Show</button>` : S.mutedHere < 0 ? ' · <button class="linkish" data-act="showmuted">Hide muted</button>' : '');
 function renderHeaderCounts() {
   const el = $('#viewHeader .sub');
   if (el) el.innerHTML = headerSubHTML();
@@ -1927,6 +1988,8 @@ function headerSub() {
   const v = S.view;
   if (v.type === 'starred') return `${all.length} starred`;
   if (v.type === 'smart') return `${unread} unread · smart folder`;
+  if (v.type === 'foryou') return `${unread} picked for you · ${S.taste.n ? `learned from ${S.taste.n} thing${S.taste.n === 1 ? '' : 's'} you did` : 'newest first until you open, star or swipe'}, on this device`;
+  if (v.type === 'kept') return `${unread} unread of ${all.length} kept in your last swipe round`;
   if (v.type === 'search') return v.status || `${all.length} results, best matches first`;
   if (v.type === 'feed') {
     const f = S.feedById.get(v.id);
@@ -1948,8 +2011,18 @@ function renderHeader() {
       <div class="vh-actions"><button data-act="checkfeeds" class="ai" ${S.ownProgress ? 'disabled' : ''} title="Fetch every feed now and apply the dead-or-alive rules">${S.ownProgress ? `Checking… ${S.ownProgress.done} of ${S.ownProgress.total}` : '⟳ Check all feeds now'}</button></div>`;
     return;
   }
+  if (v.type === 'stories' || v.type === 'highlights' || v.type === 'recap') {
+    const sub = v.type === 'stories' ? 'The same news from several of your feeds, as one story with a timeline.'
+      : v.type === 'highlights' ? `${highlightCount()} highlight${highlightCount() === 1 ? '' : 's'} and notes, kept on this device and in backups.`
+      : `${recapData().range} · worked out on this device`;
+    const actions = v.type === 'highlights' ? (highlightCount() ? '<button data-act="hlexport">⬇ Export as Markdown</button>' : '')
+      : v.type === 'recap' ? '<button data-act="recapsave">🖼 Save as image</button><button data-act="recapshare">Share…</button>'
+      : '<button data-act="triage" title="Sort your unread fast (t)">⚡ Swipe round</button>';
+    h.innerHTML = `<div class="vh-title"><h1>${esc(viewTitle())}</h1><p class="sub">${esc(sub)}</p></div><div class="vh-actions">${actions}</div>`;
+    return;
+  }
   const feed = v.type === 'feed' ? S.feedById.get(v.id) : null;
-  const filterable = !['starred', 'search', 'smart'].includes(v.type);
+  const filterable = !['starred', 'search', 'smart', 'foryou', 'kept'].includes(v.type);
   h.innerHTML = `
     <div class="vh-title">
       <h1>${feed ? avatar(feed, true) : ''}${esc(viewTitle())}</h1>
@@ -1959,7 +2032,8 @@ function renderHeader() {
     <div class="vh-actions">
       ${filterable ? `<div class="seg" role="group" aria-label="Show"><button data-act="unread" class="${S.settings.unreadOnly ? 'on' : ''}">Unread</button><button data-act="allitems" class="${S.settings.unreadOnly ? '' : 'on'}">All</button></div>` : ''}
       <div class="seg" role="group" aria-label="View"><button data-act="list" class="${S.settings.mode === 'list' ? 'on' : ''}" title="List view (1)">☰ List</button><button data-act="expanded" class="${S.settings.mode === 'expanded' ? 'on' : ''}" title="Expanded view (2)">▤ Expanded</button>${innerWidth >= PANE_MIN_WIDTH ? `<button data-act="pane" class="${S.settings.mode === 'pane' ? 'on' : ''}" title="Reading pane: the list on the left, the article on the right (3)">◫ Pane</button>` : ''}</div>
-      ${v.type !== 'search' ? `<div class="seg" role="group" aria-label="Order"><button data-act="newest" class="${S.settings.sort !== 'oldest' ? 'on' : ''}" title="Newest first">↓ Newest</button><button data-act="oldest" class="${S.settings.sort === 'oldest' ? 'on' : ''}" title="Oldest first">↑ Oldest</button></div>` : ''}
+      ${v.type === 'foryou' ? `<button data-act="triage" title="Sort your unread fast, and teach For you (t)">⚡ Swipe round</button>` : ''}
+      ${!['search', 'foryou'].includes(v.type) ? `<div class="seg" role="group" aria-label="Order"><button data-act="newest" class="${S.settings.sort !== 'oldest' ? 'on' : ''}" title="Newest first">↓ Newest</button><button data-act="oldest" class="${S.settings.sort === 'oldest' ? 'on' : ''}" title="Oldest first">↑ Oldest</button></div>` : ''}
       ${v.type !== 'starred' ? `<details class="menu"><summary class="button" title="Mark as read (Shift+A marks all)">✓ Mark read ▾</summary><div class="menu-list"><button data-act="markall">All</button><button data-act="markold" data-days="1">Older than a day</button><button data-act="markold" data-days="7">Older than a week</button></div></details>` : ''}
       ${v.type === 'topic' ? `<button data-act="renametopic">✎ Rename topic</button>` : ''}
       <button data-act="brief" class="ai" title="Ask your AI assistant for a short briefing on this list">✨ Brief me</button>
@@ -2020,9 +2094,10 @@ async function fillContent(article) {
   if (!it || !box || box.dataset.filled) return;
   box.dataset.filled = '1';
   const html = it.c ?? (await feedContent(it.f))[it.id];
-  if (!html) { box.innerHTML = `<p>${esc(it.s || '')}</p>${safeUrl(it.i) ? `<img src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}`; return; }
+  if (!html) { box.innerHTML = `<p>${esc(it.s || '')}</p>${safeUrl(it.i) ? `<img src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}`; applyHighlights(box, it.id); return; }
   box.innerHTML = sanitize(html, safeUrl(it.l) || location.href);
   if (safeUrl(it.i) && !box.querySelector('img')) box.insertAdjacentHTML('afterbegin', `<img class="lead" src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer">`);
+  applyHighlights(box, it.id);
 }
 
 function sanitize(html, base) {
@@ -2112,11 +2187,15 @@ function renderHome() {
           ${n > 1 ? ` You're on a <b>${n}-day</b> streak 🔥` : ''}</p>
         <div class="hero-actions">
           <a class="button primary" href="#/all">Start reading →</a>
+          <button data-act="triage" title="Sort your unread fast, and teach For you what you like (t)">⚡ Swipe round</button>
           <button data-act="surprise">🎲 Surprise me</button>
           <button data-act="brief" class="ai">✨ Brief me on what's new</button>
         </div>
         <div class="brief" id="brief" hidden></div>
       </div>
+      ${recapLineHTML()}
+      ${homeForYouHTML()}
+      ${homeStoriesHTML()}
       ${fresh.length ? `<h2 class="home-h">Fresh picks</h2><div class="cards">${fresh.map((it) => {
         const f = S.feedById.get(it.f);
         return `<a class="card" href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><img src="${esc(safeUrl(it.i))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span class="card-src">${esc(f?.title || '')} · ${ago(it.d)}</span><span class="card-t">${esc(it.t)}</span></a>`;
@@ -2125,9 +2204,25 @@ function renderHome() {
       <h2 class="home-h">AI topics</h2>
       <p class="hint">Follow a subject across every feed. The AI matches articles by meaning, not just keywords.</p>
       <div class="chips">${S.topics.map((t) => `<a class="chip" href="#/topic/${t.id}">✨ ${esc(t.name)}${S.vectorsState !== 'loading' ? ` <b>${unreadOf(topicMatches(t).items)}</b>` : ''}</a>`).join('')}<button class="chip add" data-act="newtopic">＋ New topic</button></div>
+      ${tidyHTML()}
       ${healthSummaryHTML()}
       ${store.get('deviceNoteDismissed', false) ? deviceNoteHTML(false) : ''}
     </section>`;
+}
+
+/** Home: the best unread for you (once it has learned a little). */
+function homeForYouHTML() {
+  if ((S.taste.n || 0) < 3) return `<p class="hint foryou-hint">🎯 <b>For you</b> learns what you like from what you open, star and keep. Play a <button class="linkish" data-act="triage">⚡ swipe round</button> to teach it fast.</p>`;
+  const list = (forYouSoon() || []).slice(0, 6);
+  if (!list.length) return '';
+  return `<h2 class="home-h">🎯 For you <a class="linkish more-link" href="#/foryou">See all →</a></h2><div class="mini-list">${list.map((it) => `<a href="#/feed/${esc(it.f)}" data-open="${esc(it.id)}"><span class="src">${esc(S.feedById.get(it.f)?.title || '')}</span><span class="t">${esc(it.t)}</span><time>${ago(it.d)}</time></a>`).join('')}</div>`;
+}
+
+/** Home: the three biggest developing stories. */
+function homeStoriesHTML() {
+  const list = (storiesSoon() || []).filter((st) => storyUnread(st)).slice(0, 3);
+  if (!list.length) return '';
+  return `<h2 class="home-h">🧵 Developing stories <a class="linkish more-link" href="#/stories">See all →</a></h2><div class="mini-list stories-mini">${list.map((st) => `<a href="#/stories" data-story-link="${esc(st.id)}"><span class="src">${st.feeds} sources · ${st.items.length} articles</span><span class="t">${esc(st.lead.t)}</span><time>${ago(st.last)}</time></a>`).join('')}</div>`;
 }
 
 function updateTitle() {
@@ -2326,6 +2421,9 @@ function render() {
   renderHeader();
   if (S.view.type === 'home') renderHome();
   else if (S.view.type === 'health') renderHealth();
+  else if (S.view.type === 'stories') renderStories();
+  else if (S.view.type === 'highlights') renderHighlights();
+  else if (S.view.type === 'recap') renderRecap();
   else if (S.view.type === 'folder' && S.view.id === RETIRED) renderRetired();
   else renderList();
   updateTitle();
@@ -2390,7 +2488,7 @@ function openEntry(a) {
     fillContent(a);
   }
   S.view.keep?.add(id); // keep it visible in "unread only" until you leave the view
-  if (!isRead(id)) markRead(id);
+  if (!isRead(id)) { markRead(id); noteOpened(S.byId.get(id)); }
 }
 
 function closeEntry(a) {
@@ -2412,7 +2510,7 @@ const readObserver = new IntersectionObserver((list) => {
     if (!e.isIntersecting && e.boundingClientRect.top < 0) {
       const id = e.target.dataset.id;
       S.view.keep?.add(id);
-      if (!isRead(id)) markRead(id);
+      if (!isRead(id)) { markRead(id); noteOpened(S.byId.get(id)); }
       readObserver.unobserve(e.target);
     }
   }
@@ -2455,20 +2553,24 @@ function needKey() {
 }
 
 /** Streams an AI answer into box, with a "via" line naming the assistant. */
-async function streamAI(box, { system, prompt, pool, working }) {
+async function streamAI(box, { system, prompt, pool, working, signal, closable }) {
   const { p, key, model } = ai();
+  // The briefing box gets a ✕ (Esc closes it too).
+  const close = closable ? '<button type="button" class="icon-btn brief-close" data-act="closebrief" aria-label="Close the briefing (Esc)" title="Close (Esc)">✕</button>' : '';
   box.hidden = false;
-  box.innerHTML = `<p class="loading">✨ ${esc(working)} <span class="muted">(${esc(p.name)})</span></p>`;
+  box.innerHTML = `${close}<p class="loading">✨ ${esc(working)} <span class="muted">(${esc(p.name)})</span></p>`;
   let acc = '';
   try {
     const res = await askAI({
-      providerId: p.id, apiKey: key, model, system, prompt,
-      onText: (t) => { acc += t; box.innerHTML = formatAI(acc, pool); },
+      providerId: p.id, apiKey: key, model, system, prompt, signal,
+      onText: (t) => { if (signal?.aborted) return; acc += t; box.innerHTML = close + formatAI(acc, pool); },
     });
-    box.innerHTML = formatAI(res.text, pool) + `<p class="via">✨ ${esc(p.name)} · ${esc(res.model)} · <button class="linkish" data-act="switchai">switch assistant</button></p>`;
+    if (signal?.aborted) return;
+    box.innerHTML = close + formatAI(res.text, pool) + `<p class="via">✨ ${esc(p.name)} · ${esc(res.model)} · <button class="linkish" data-act="switchai">switch assistant</button></p>`;
   } catch (e) {
+    if (signal?.aborted) return;
     const msg = /dynamically imported module|Importing a module script failed/i.test(e.message) ? "Couldn't load the AI library. Check your connection or ad blocker and try again." : e.message;
-    box.innerHTML = `<p class="error">${esc(msg)}</p><p class="via"><button class="linkish" data-act="switchai">Change assistant or key</button></p>`;
+    box.innerHTML = `${close}<p class="error">${esc(msg)}</p><p class="via"><button class="linkish" data-act="switchai">Change assistant or key</button></p>`;
   }
 }
 
@@ -2489,14 +2591,29 @@ async function brief() {
   if (needKey()) return;
   const box = $('#brief');
   const pool = (S.view.type === 'home' ? S.items : S.list).filter((i) => S.view.type === 'search' || S.view.type === 'starred' || !isRead(i.id)).slice(0, 40);
-  if (!pool.length) { box.hidden = false; box.innerHTML = '<p>Nothing unread to brief you on. 🎉</p>'; return; }
+  S.briefAbort?.abort();
+  S.briefAbort = new AbortController();
+  if (!pool.length) { box.hidden = false; box.innerHTML = '<button type="button" class="icon-btn brief-close" data-act="closebrief" aria-label="Close the briefing (Esc)" title="Close (Esc)">✕</button><p>Nothing unread to brief you on. 🎉</p>'; return; }
   const listing = pool.map((it, k) => `[${k + 1}] ${it.t} (${S.feedById.get(it.f)?.title || ''}, ${ago(it.d)}): ${it.s.slice(0, 200)}`).join('\n');
   await streamAI(box, {
     pool,
+    signal: S.briefAbort.signal,
+    closable: true,
     working: 'Reading the headlines…',
     system: 'You write a quick, friendly briefing for someone opening their RSS reader. Group related stories into 3-6 short themed points ("- " bullets). Cite stories by their number in square brackets like [3]. Start with one sentence on the overall picture. Plain text, under 200 words.',
     prompt: `${S.view.type === 'search' ? `They searched for: ${S.view.q}\n` : S.view.type === 'topic' ? `Topic: ${viewTitle()}\n` : ''}Stories:\n${listing}`,
   });
+}
+
+/** Closes the briefing (✕ or Esc) and stops the assistant if it's still writing. */
+function closeBrief() {
+  const box = $('#brief');
+  if (!box || box.hidden) return false;
+  S.briefAbort?.abort();
+  S.briefAbort = null;
+  box.hidden = true;
+  box.innerHTML = '';
+  return true;
 }
 
 function switchProvider(id) {
@@ -3017,10 +3134,590 @@ function invSidebarHTML(active, count) {
     <div class="folder-feeds">${rows.map(({ inv, n }) => `<a class="nav-item inv${S.invOpen === inv.id ? ' active' : ''}" data-hue="${hueOf('i' + inv.id)}" href="#" data-inv="${esc(inv.id)}"><span class="ico">🕵️</span><span class="name">${esc(inv.name)}</span>${inv.follow?.x ? '<span class="muted" title="Watching X">𝕏</span>' : ''}${count(n)}</a>`).join('')}</div></div>`;
 }
 
+// ---------- learning what you like (🎯 For you), all on this device ----------
+// Opening, starring, keeping and highlighting an article teach the reader what
+// you like; skipping teaches it what you don't. It weighs the feed, the
+// headline's words and (when the AI search data is loaded) the meaning.
+
+const LOG_MAX = 6000;
+/** A short history of what you did (for the weekly recap): [time, article, feed, kind]. */
+function logEvent(kind, it) {
+  S.log.push([Date.now(), it?.id || '', it?.f || '', kind]);
+  if (S.log.length > LOG_MAX) S.log = S.log.slice(-LOG_MAX);
+  saveSoon('log', () => S.log);
+}
+function teach(it, w) {
+  if (!it || !w) return;
+  learn(S.taste, it, w, S.vectors.get(it.id), modelKey());
+  saveSoon('taste', () => S.taste);
+  S.forYouCache = null;
+}
+const bump = (k, n = 1) => { S.stats[k] = (S.stats[k] || 0) + n; saveSoon('stats', () => S.stats); };
+
+/** You opened (or read through) an article: counted once per article. */
+function noteOpened(it) {
+  if (!it) return;
+  teach(it, 1);
+  logEvent('o', it);
+  bump('opened');
+  S.stats.feedsRead ??= {};
+  S.stats.feedsRead[it.f] = (S.stats.feedsRead[it.f] || 0) + 1;
+  const h = new Date().getHours();
+  if (h < 5) bump('owl'); else if (h < 7) bump('bird');
+  const lang = detectLang(`${it.t} ${it.s || ''}`, S.feedById.get(it.f)?.lang || '');
+  if (lang) { S.stats.langs ??= {}; S.stats.langs[lang] = (S.stats.langs[lang] || 0) + 1; }
+  checkBadges();
+}
+
+/** Unread articles from the last week, best for you first (at most 4 per feed in a row of 150). */
+function forYou() {
+  const key = `${S.version}|${S.taste.n}|${modelKey()}`;
+  if (S.forYouCache?.key === key) return S.forYouCache.items;
+  const now = Date.now();
+  // The last week's unread (or, when that's thin, everything unread).
+  let pool = [];
+  for (const it of S.uniq) {
+    if (now - it.d > 7 * 864e5) break;
+    if (!isRead(it.id)) pool.push(it);
+    if (pool.length >= 4000) break;
+  }
+  if (pool.length < 40) pool = S.uniq.filter((it) => !isRead(it.id)).slice(0, 4000);
+  const m = modelKey();
+  const scored = pool.map((it) => [it, tasteScore(S.taste, it, S.vectors.get(it.id), m, now)]).sort((a, b) => b[1] - a[1]);
+  const perFeed = new Map();
+  const items = [];
+  for (const [it] of scored) {
+    const n = perFeed.get(it.f) || 0;
+    if (n >= 4) continue;
+    perFeed.set(it.f, n + 1);
+    items.push(it);
+    if (items.length >= 150) break;
+  }
+  S.forYouCache = { key, items };
+  return items;
+}
+
+/** For Home and the sidebar: the last answer at once, worked out again when the page is idle. */
+function whenIdle(name, work) {
+  S.idleJobs ??= {};
+  if (S.idleJobs[name]) return;
+  S.idleJobs[name] = setTimeout(() => {
+    S.idleJobs[name] = 0;
+    work();
+    renderSidebar();
+    if (S.view.type === 'home') refreshHome();
+  }, 1200);
+}
+function forYouSoon() {
+  if (S.forYouCache?.key === `${S.version}|${S.taste.n}|${modelKey()}`) return S.forYouCache.items;
+  if (!S.forYouCache) return forYou(); // the first time: right away
+  whenIdle('foryou', forYou);
+  return S.forYouCache.items;
+}
+
+// ---------- 🧵 developing stories: the same news from several feeds ----------
+
+function stories() {
+  if (S.storyCache?.key === S.version) return S.storyCache.list;
+  const list = clusterStories(S.uniq, (id) => S.vectors.get(id));
+  S.storyCache = { key: S.version, list };
+  return list;
+}
+function storiesSoon() {
+  if (S.storyCache?.key === S.version) return S.storyCache.list;
+  if (!S.storyCache) return stories();
+  whenIdle('stories', stories);
+  return S.storyCache.list;
+}
+const storyUnread = (st) => st.items.reduce((n, i) => n + (isRead(i.id) ? 0 : 1), 0);
+
+function storyHTML(st) {
+  const feeds = [...new Set(st.items.map((i) => i.f))];
+  const unread = storyUnread(st);
+  const lead = st.lead;
+  const dt = (t) => new Date(t).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  return `<details class="story${unread ? '' : ' read'}" data-story="${esc(st.id)}"><summary>
+      ${safeUrl(lead.i) ? `<img src="${esc(safeUrl(lead.i))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+      <span class="story-main"><span class="story-t">${esc(lead.t)}</span>
+      <span class="story-meta">${feeds.slice(0, 6).map((f) => avatar(S.feedById.get(f))).join('')} ${st.feeds} sources · ${st.items.length} articles${unread ? ` · <b>${unread} unread</b>` : ''} · updated ${agoText(st.last)}</span></span></summary>
+    <ol class="timeline">${st.items.map((i) => `<li class="${isRead(i.id) ? 'read' : ''}"><time datetime="${new Date(i.d).toISOString()}">${esc(dt(i.d))}</time> <a href="#/feed/${esc(i.f)}" data-open="${esc(i.id)}">${esc(i.t)}</a> <span class="muted">· ${esc(S.feedById.get(i.f)?.title || '')}</span></li>`).join('')}</ol>
+    <div class="story-actions">${unread ? `<button data-act="storyread" data-story="${esc(st.id)}">✓ Mark the story read</button>` : ''}<button data-act="storyinv" data-story="${esc(st.id)}" class="ai" title="Dig into this story with an AI assistant on the side">🕵️ Investigate</button></div>
+  </details>`;
+}
+
+function renderStories() {
+  const list = stories();
+  const want = S.openStory;
+  S.openStory = null;
+  if (want) setTimeout(() => { const d = document.querySelector(`details.story[data-story="${CSS.escape(want)}"]`); if (d) { d.open = true; d.scrollIntoView({ block: 'start' }); bump('stories'); checkBadges(); } }, 0);
+  $('#list').innerHTML = list.length
+    ? `<div class="stories">${list.slice(0, 40).map(storyHTML).join('')}</div>`
+    : `<div class="empty"><p class="big">🧵</p><p>No developing stories right now. When several of your feeds cover the same news, it shows up here as one story with a timeline.</p>${S.vectorsState === 'loading' ? '<p class="muted">Matching articles by meaning…</p>' : ''}</div>`;
+}
+
+// ---------- 🔇 mute by meaning ----------
+
+const MUTE_SIM = 0.5; // stricter than topics: muting too much is worse than too little
+const muteVec = (m) => { const a = modelKey() === 'multi' ? m.qvm : m.qv; return a ? Float32Array.from(a) : null; };
+
+/** Articles matching a muted subject (by its words, or by meaning when the AI data is loaded). */
+function mutedIds(mutes = S.mutes) {
+  if (!mutes?.length) return null;
+  const ms = mutes.map((m) => {
+    const q = m.q.trim();
+    return { phrase: wordRe(q), words: q.split(/\s+/).filter((w) => w.length > 2).map(wordRe), v: muteVec(m) };
+  });
+  const out = new Set();
+  for (const it of S.items) {
+    const hay = `${it.t} ${it.s || ''}`;
+    const v = S.vectors.get(it.id);
+    for (const m of ms) {
+      if (m.phrase.test(hay) || (m.words.length > 1 && m.words.every((w) => w.test(hay))) || (m.v && v && dot(m.v, v) >= MUTE_SIM)) { out.add(it.id); break; }
+    }
+  }
+  return out;
+}
+
+function openMute(prefill = '') {
+  $('#muteInput').value = prefill;
+  $('#muteStatus').textContent = '';
+  renderMutes();
+  $('#muteDialog').showModal();
+  $('#muteInput').focus();
+}
+
+function renderMutes() {
+  const counts = new Map(S.mutes.map((m) => [m.id, mutedIds([m])?.size || 0]));
+  $('#muteList').innerHTML = S.mutes.length
+    ? S.mutes.map((m) => `<li><span class="name">🔇 ${esc(m.q)}</span><span class="muted">${counts.get(m.id) ? `hiding ${counts.get(m.id)} now` : 'nothing right now'}${muteVec(m) ? '' : ' · by its words'}</span><button type="button" class="ghost" data-unmute="${esc(m.id)}" aria-label="Unmute ${esc(m.q)}">Unmute</button></li>`).join('')
+    : '<li class="muted">Nothing muted yet.</li>';
+}
+
+async function addMute(q) {
+  q = q.trim();
+  if (!q) return;
+  if (S.mutes.some((m) => m.q.toLowerCase() === q.toLowerCase())) { $('#muteStatus').textContent = 'Already muted.'; return; }
+  const m = { id: hash(q + Date.now()), q };
+  S.mutes.push(m);
+  store.set('mutes', S.mutes);
+  bump('mutes');
+  checkBadges();
+  $('#muteInput').value = '';
+  rebuild(); render(); renderMutes();
+  const status = $('#muteStatus');
+  status.textContent = `Muted “${q}”. Teaching the AI what it means…`;
+  try {
+    const [v] = await embed([q], (p) => { status.textContent = `Downloading the AI model (first time only)… ${Math.round(p * 100)}%`; });
+    m[modelKey() === 'multi' ? 'qvm' : 'qv'] = Array.from(v, (x) => +x.toFixed(4));
+    store.set('mutes', S.mutes);
+    await loadVectors();
+    rebuild(); render(); renderMutes();
+    status.textContent = `Muted “${q}”, by meaning too.`;
+  } catch (e) {
+    console.warn('Mute vector', e);
+    status.textContent = `Muted “${q}” by its words (the AI model couldn't load).`;
+  }
+}
+
+function unmute(id) {
+  S.mutes = S.mutes.filter((m) => m.id !== id);
+  store.set('mutes', S.mutes);
+  rebuild(); render(); renderMutes();
+}
+
+// ---------- 🧹 tidy up: feeds you never open ----------
+
+const TIDY_DAYS = 21;
+function tidyTips() {
+  const since = S.stats.since || Date.now();
+  if (Date.now() - since < TIDY_DAYS * 864e5) return [];
+  const keep = new Set(S.settings.tidyKeep || []);
+  const counts = new Map();
+  for (const it of S.items) if (it.d > since) counts.set(it.f, (counts.get(it.f) || 0) + 1);
+  const starredFeeds = new Set(Object.values(S.starred).map((s) => s.f));
+  return S.feeds
+    .filter((f) => !f.retired && !keep.has(f.id) && (counts.get(f.id) || 0) >= 8 && !S.stats.feedsRead?.[f.id] && !starredFeeds.has(f.id))
+    .map((f) => ({ f, n: counts.get(f.id) }))
+    .sort((a, b) => b.n - a.n);
+}
+
+function tidyHTML() {
+  if ((S.settings.tidySnooze || 0) > Date.now()) return '';
+  const tips = tidyTips();
+  if (!tips.length) return '';
+  const days = Math.round((Date.now() - S.stats.since) / 864e5);
+  return `<section class="tidy" aria-labelledby="tidyH"><h2 class="home-h" id="tidyH">🧹 Tidy up</h2>
+    <p>You haven't opened anything from ${tips.length === 1 ? 'this feed' : `these ${tips.length} feeds`} in ${days} days. Unsubscribe to keep your reader for what you read.</p>
+    <ul class="tidy-list">${tips.slice(0, 10).map(({ f, n }) => `<li><label class="check"><input type="checkbox" data-tidy="${esc(f.id)}" checked> ${avatar(f)} <span class="name">${esc(f.title)}</span> <span class="muted">${n} articles</span></label></li>`).join('')}</ul>
+    <div class="buttons left"><button data-act="tidyunsub" class="danger">Unsubscribe from selected</button><button data-act="tidykeep" class="ghost">Keep them</button><button data-act="tidylater" class="ghost">Not now</button></div></section>`;
+}
+
+function tidyAction(act) {
+  const boxes = [...document.querySelectorAll('[data-tidy]')];
+  if (act === 'tidyunsub') {
+    const ids = boxes.filter((b) => b.checked).map((b) => b.dataset.tidy);
+    if (!ids.length) { toast('Tick the feeds to unsubscribe from'); return; }
+    for (const id of ids) unsubscribe(id);
+    bump('tidied', ids.length);
+    checkBadges();
+    toast(`Unsubscribed from ${ids.length} feed${ids.length === 1 ? '' : 's'}`);
+  } else if (act === 'tidykeep') {
+    S.settings.tidyKeep = [...new Set([...(S.settings.tidyKeep || []), ...boxes.map((b) => b.dataset.tidy)])];
+    saveSettings();
+  } else {
+    S.settings.tidySnooze = Date.now() + 14 * 864e5;
+    saveSettings();
+  }
+  render();
+}
+
+// ---------- 🖍 highlights and notes ----------
+
+/** Wraps the first place `text` appears in `box` (ignoring spacing and case) in <mark>s. */
+function markText(box, text, note) {
+  const nodes = [];
+  const map = [];
+  let hay = '';
+  let space = true;
+  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walker.nextNode());) {
+    const k = nodes.push(n) - 1;
+    const s = n.data;
+    for (let i = 0; i < s.length; i++) {
+      if (/\s/.test(s[i])) { if (space) continue; hay += ' '; space = true; } else { hay += s[i].toLowerCase(); space = false; }
+      map.push([k, i]);
+    }
+  }
+  const needle = text.replace(/\s+/g, ' ').trim().toLowerCase();
+  const at = needle ? hay.indexOf(needle) : -1;
+  if (at < 0) return false;
+  const [k0, o0] = map[at];
+  const [k1, o1] = map[at + needle.length - 1];
+  for (let k = k1; k >= k0; k--) {
+    const node = nodes[k];
+    const a = k === k0 ? o0 : 0;
+    const b = k === k1 ? o1 + 1 : node.data.length;
+    if (!node.data.slice(a, b).trim()) continue;
+    const mid = a > 0 ? node.splitText(a) : node;
+    if (b - a < mid.data.length) mid.splitText(b - a);
+    const mark = document.createElement('mark');
+    mark.className = note ? 'hl has-note' : 'hl';
+    if (note) mark.title = note;
+    mid.replaceWith(mark);
+    mark.append(mid);
+  }
+  return true;
+}
+
+function applyHighlights(box, id) {
+  if (!box) return;
+  for (const m of box.querySelectorAll('mark.hl')) m.replaceWith(...m.childNodes);
+  box.normalize();
+  for (const h of S.highlights[id]?.list || []) markText(box, h.x, h.n);
+}
+
+function updateHlBar() {
+  const bar = $('#hlBar');
+  const sel = getSelection();
+  const hide = () => { bar.hidden = true; S.hlPending = null; };
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return hide();
+  const r = sel.getRangeAt(0);
+  const anc = r.commonAncestorContainer.nodeType === 1 ? r.commonAncestorContainer : r.commonAncestorContainer.parentElement;
+  const box = anc?.closest('[data-content]');
+  const text = sel.toString().replace(/\s+/g, ' ').trim();
+  const id = box?.closest('article.entry')?.dataset.id;
+  if (!box || !id || text.length < 3 || text.length > 2000) return hide();
+  S.hlPending = { id, text, box };
+  bar.hidden = false;
+  const rect = r.getBoundingClientRect();
+  const top = rect.top - bar.offsetHeight - 10;
+  bar.style.top = `${top < 60 ? rect.bottom + 10 : top}px`;
+  bar.style.left = `${Math.max(8, Math.min(innerWidth - bar.offsetWidth - 8, rect.left + rect.width / 2 - bar.offsetWidth / 2))}px`;
+}
+
+function saveHighlight(withNote) {
+  const p = S.hlPending;
+  const it = p && (S.byId.get(p.id) || S.starred[p.id]);
+  if (!it) return;
+  const finish = (note) => {
+    const rec = (S.highlights[p.id] ??= { t: it.t, l: it.l, f: S.feedById.get(it.f)?.title || '', d: it.d, list: [] });
+    rec.list.push({ x: p.text.slice(0, 2000), n: (note || '').trim(), at: Date.now() });
+    rec.at = Date.now();
+    store.set('highlights', S.highlights);
+    getSelection()?.removeAllRanges();
+    $('#hlBar').hidden = true;
+    applyHighlights(p.box, p.id);
+    teach(it, 2);
+    logEvent('h', it);
+    bump('highlights');
+    checkBadges();
+    renderSidebar();
+    toast(note ? '📝 Note saved in 🖍 Highlights' : '🖍 Highlighted · find it in 🖍 Highlights');
+  };
+  if (withNote) openNote(p.text, '', finish); else finish('');
+}
+
+let noteDone = null;
+function openNote(quote, current, done) {
+  $('#noteQuote').textContent = quote;
+  $('#noteText').value = current;
+  noteDone = done;
+  $('#noteDialog').showModal();
+  $('#noteText').focus();
+}
+
+function highlightCount() { let n = 0; for (const r of Object.values(S.highlights)) n += r.list?.length || 0; return n; }
+
+function renderHighlights() {
+  const recs = Object.entries(S.highlights).filter(([, r]) => r.list?.length).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
+  $('#list').innerHTML = recs.length
+    ? `<div class="hl-list">${recs.map(([id, r]) => `<section class="hl-art">
+        <h2>${S.byId.has(id) || S.starred[id] ? `<a href="#" data-open="${esc(id)}">${esc(r.t)}</a>` : `<a href="${esc(safeUrl(r.l) || '#')}" target="_blank" rel="noopener noreferrer">${esc(r.t)} ↗</a>`}</h2>
+        <p class="muted">${esc(r.f)}${r.d ? ` · ${esc(new Date(r.d).toLocaleDateString(undefined, { dateStyle: 'medium' }))}` : ''}</p>
+        ${r.list.map((h, i) => `<blockquote class="hl-q"><p><mark class="hl">${esc(h.x)}</mark></p>${h.n ? `<p class="hl-note">📝 ${esc(h.n)}</p>` : ''}<p class="hl-actions"><button class="linkish" data-act="hlnote" data-id="${esc(id)}" data-i="${i}">${h.n ? '✎ Edit note' : '📝 Add a note'}</button> · <button class="linkish" data-act="hldel" data-id="${esc(id)}" data-i="${i}">Delete</button></p></blockquote>`).join('')}
+      </section>`).join('')}</div>`
+    : `<div class="empty"><p class="big">🖍</p><p>Select text in any article to highlight it or add a note. Everything you save shows up here, and in your backups.</p></div>`;
+}
+
+function exportHighlights() {
+  const recs = Object.values(S.highlights).filter((r) => r.list?.length).sort((a, b) => (b.at || 0) - (a.at || 0));
+  let md = `# Highlights from Sala Reader\n\n_Exported ${new Date().toLocaleString()}_\n\n`;
+  for (const r of recs) {
+    md += `## [${r.t.replace(/[[\]]/g, '')}](${safeUrl(r.l) || ''})\n\n_${r.f}${r.d ? ` · ${new Date(r.d).toLocaleDateString()}` : ''}_\n\n`;
+    for (const h of r.list) md += `> ${h.x.replace(/\n/g, '\n> ')}\n\n${h.n ? `${h.n}\n\n` : ''}`;
+  }
+  download(`salareader-highlights-${today()}.md`, md, 'text/markdown');
+}
+
+function highlightAction(act, btn) {
+  const rec = S.highlights[btn.dataset.id];
+  const i = +btn.dataset.i;
+  if (!rec?.list[i]) return;
+  if (act === 'hldel') {
+    rec.list.splice(i, 1);
+    if (!rec.list.length) delete S.highlights[btn.dataset.id];
+    store.set('highlights', S.highlights);
+    render();
+  } else {
+    openNote(rec.list[i].x, rec.list[i].n || '', (note) => { rec.list[i].n = note.trim(); store.set('highlights', S.highlights); render(); });
+  }
+}
+
+// ---------- ⚡ swipe rounds: sort your unread fast, and teach For you ----------
+
+let tri = null;
+let triTimer = 0;
+function openTriage() {
+  const pool = forYou().filter((i) => !isRead(i.id)).slice(0, 20);
+  if (!pool.length) { toast('Nothing unread to sort. 🎉'); return; }
+  tri = { pool, i: 0, kept: [], skipped: 0, start: Date.now() };
+  const d = $('#triageDialog');
+  if (!d.open) d.showModal();
+  triCard();
+  clearInterval(triTimer);
+  triTimer = setInterval(() => { if (!d.open) { clearInterval(triTimer); return; } if (tri && tri.i < tri.pool.length) $('#triTime').textContent = `⏱ ${Math.floor((Date.now() - tri.start) / 1000)} s`; }, 250);
+}
+
+function triCard() {
+  const stage = $('#triStage');
+  if (tri.i >= tri.pool.length) { triDone(); return; }
+  const it = tri.pool[tri.i];
+  const f = S.feedById.get(it.f);
+  $('#triProg').textContent = `${tri.i + 1} / ${tri.pool.length}`;
+  $('#triBtns').hidden = false;
+  $('#triageDialog .tri-hint').hidden = false;
+  stage.innerHTML = `<article class="tri-card" data-id="${esc(it.id)}" aria-live="polite">
+    ${safeUrl(it.i) ? `<img src="${esc(safeUrl(it.i))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+    <div class="tri-body"><p class="tri-src">${avatar(f)} ${esc(f?.title || '')} · ${ago(it.d)}</p><h2>${esc(it.t)}</h2><p class="tri-snip">${esc((it.s || '').slice(0, 300))}</p></div>
+    <span class="tri-stamp keep" aria-hidden="true">KEEP</span><span class="tri-stamp skip" aria-hidden="true">SKIP</span></article>`;
+  const card = stage.firstElementChild;
+  let drag = null;
+  card.addEventListener('pointerdown', (e) => {
+    if (e.button) return;
+    drag = { x: e.clientX, dx: 0 };
+    card.setPointerCapture(e.pointerId);
+    card.classList.add('dragging');
+  });
+  card.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    drag.dx = e.clientX - drag.x;
+    card.style.transform = `translateX(${drag.dx}px) rotate(${drag.dx / 18}deg)`;
+    card.style.setProperty('--keep', Math.max(0, Math.min(1, drag.dx / 110)));
+    card.style.setProperty('--skip', Math.max(0, Math.min(1, -drag.dx / 110)));
+  });
+  const end = () => {
+    if (!drag) return;
+    const dx = drag.dx;
+    drag = null;
+    card.classList.remove('dragging');
+    if (dx > 100) triAct('keep');
+    else if (dx < -100) triAct('skip');
+    else { card.style.transform = ''; card.style.setProperty('--keep', 0); card.style.setProperty('--skip', 0); }
+  };
+  card.addEventListener('pointerup', end);
+  card.addEventListener('pointercancel', end);
+}
+
+function triAct(kind) {
+  const it = tri?.pool[tri.i];
+  if (!it) return;
+  if (kind === 'readkept') { $('#triageDialog').close(); go('#/kept'); return; }
+  bump('swipes');
+  logEvent('w', it);
+  if (kind === 'open') {
+    tri.kept.push(it.id);
+    S.kept = tri.kept; store.set('kept', S.kept);
+    $('#triageDialog').close();
+    openItemAnywhere(it.id);
+    return;
+  }
+  if (kind === 'skip') { teach(it, -1.5); markRead(it.id); tri.skipped++; }
+  else {
+    if (kind === 'star' && !S.starred[it.id]) toggleStar(it.id); else teach(it, 2);
+    tri.kept.push(it.id);
+    S.kept = tri.kept; store.set('kept', S.kept);
+  }
+  const card = $('#triStage .tri-card');
+  card?.classList.add(kind === 'skip' ? 'fly-left' : 'fly-right');
+  tri.i++;
+  setTimeout(triCard, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 180);
+}
+
+function triDone() {
+  const ms = Date.now() - tri.start;
+  const n = tri.pool.length;
+  let best = false;
+  if (n === 20 && (!S.stats.bestRound || ms < S.stats.bestRound)) { S.stats.bestRound = ms; best = true; saveSoon('stats', () => S.stats); }
+  bump('rounds');
+  checkBadges();
+  $('#triBtns').hidden = true;
+  $('#triageDialog .tri-hint').hidden = true;
+  $('#triProg').textContent = 'Done';
+  $('#triTime').textContent = '';
+  const secs = Math.round(ms / 1000);
+  $('#triStage').innerHTML = `<div class="tri-done" role="status"><p class="big" aria-hidden="true">${tri.skipped === n ? '🧹' : '⚡'}</p><h2>Round done!</h2>
+    <p>Sorted <b>${n}</b> in <b>${secs} s</b>${best && S.stats.rounds > 1 ? ' · 🏆 new personal best' : ''}.</p>
+    <p class="muted">${tri.skipped} skipped · ${tri.kept.length} kept for later. Every swipe teaches 🎯 For you what you like.</p>
+    <div class="buttons">${tri.kept.length ? `<button type="button" class="primary" data-tri="readkept">Read the ${tri.kept.length} kept →</button>` : ''}<button type="button" data-tri="again">Another round</button><button type="button" class="ghost" data-close>Done</button></div></div>`;
+  $('#triStage .tri-done button')?.focus();
+}
+
+// ---------- 📊 the weekly recap and 🏅 achievements ----------
+
+function checkBadges() {
+  S.stats.bestStreak = Math.max(S.stats.bestStreak || 0, streak());
+  const fresh = newBadges(S.stats, S.badges);
+  if (!fresh.length) return;
+  for (const b of fresh) S.badges[b.id] = Date.now();
+  store.set('badges', S.badges);
+  saveSoon('stats', () => S.stats);
+  const el = $('#badgeToast');
+  el.innerHTML = fresh.length === 1
+    ? `<span class="b-ico" aria-hidden="true">${fresh[0].icon}</span><span><b>Achievement unlocked: ${esc(fresh[0].name)}</b><br>${esc(fresh[0].desc)}</span>`
+    : `<span class="b-ico" aria-hidden="true">🏅</span><span><b>${fresh.length} achievements unlocked</b><br>${fresh.map((b) => `${b.icon} ${esc(b.name)}`).join(' · ')}</span>`;
+  el.hidden = false;
+  el.classList.remove('show');
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(S.badgeTimer);
+  S.badgeTimer = setTimeout(() => { el.classList.remove('show'); setTimeout(() => { el.hidden = true; }, 300); }, 5000);
+}
+
+function recapData() {
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+  const start = end - 7 * 864e5;
+  const within = (t, a, b) => t >= a && t < b;
+  const week = S.log.filter((e) => within(e[0], start, end));
+  const opens = week.filter((e) => e[3] === 'o');
+  const prevOpens = S.log.filter((e) => e[3] === 'o' && within(e[0], start - 7 * 864e5, start)).length;
+  const readN = Object.values(S.read).filter((t) => within(t, start, end)).length;
+  const days = Array.from({ length: 7 }, (_, k) => {
+    const a = start + k * 864e5;
+    return { label: new Date(a + 6 * 36e5).toLocaleDateString(undefined, { weekday: 'short' }), n: opens.filter((e) => within(e[0], a, a + 864e5)).length };
+  });
+  const tally = (keys) => { const m = new Map(); for (const k of keys) if (k) m.set(k, (m.get(k) || 0) + 1); return [...m].sort((a, b) => b[1] - a[1]); };
+  const feeds = tally(opens.map((e) => e[2])).map(([f, n]) => [S.feedById.get(f)?.title || 'A feed you left', n]);
+  const topics = [];
+  const langs = [];
+  const fmOf = new Map();
+  for (const e of opens) {
+    const it = S.byId.get(e[1]) || S.starred[e[1]];
+    if (!it) continue;
+    let fm = fmOf.get(it.f);
+    if (!fm) { const f = S.feedById.get(it.f); fm = { lang: f?.lang || '', folders: f ? feedFolders(f) : [] }; fmOf.set(it.f, fm); }
+    for (const id of classify(it, fm)) { if (id.startsWith('topic:')) topics.push(id); else if (id.startsWith('lang:')) langs.push(id); }
+  }
+  const hours = tally(opens.map((e) => String(new Date(e[0]).getHours())));
+  const fmt = (t, o) => new Date(t).toLocaleDateString(undefined, o);
+  return {
+    start, end,
+    range: `${fmt(start, { month: 'short', day: 'numeric' })} – ${fmt(end - 1, { month: 'short', day: 'numeric', year: 'numeric' })}`,
+    opened: opens.length, prevOpens, readN, days, feeds: feeds.slice(0, 5),
+    topics: tally(topics).slice(0, 5).map(([id, n]) => [smartInfo(id), n]).filter(([i]) => i),
+    langs: tally(langs).map(([id, n]) => [smartInfo(id), n]).filter(([i]) => i),
+    stars: week.filter((e) => e[3] === 's').length,
+    highlights: week.filter((e) => e[3] === 'h').length,
+    swipes: week.filter((e) => e[3] === 'w').length,
+    hour: hours[0] ? +hours[0][0] : null,
+    badges: Object.entries(S.badges).filter(([, t]) => within(t, start, end)).map(([id]) => BADGES.find((b) => b.id === id)).filter(Boolean),
+    streak: streak(),
+  };
+}
+
+function renderRecap() {
+  const r = recapData();
+  const max = Math.max(1, ...r.days.map((d) => d.n));
+  const change = r.prevOpens ? Math.round(((r.opened - r.prevOpens) / r.prevOpens) * 100) : null;
+  const hourText = r.hour == null ? '' : new Date(2000, 0, 1, r.hour).toLocaleTimeString(undefined, { hour: 'numeric' });
+  const earned = BADGES.filter((b) => S.badges[b.id]).length;
+  $('#list').innerHTML = `<section class="recap">
+    <div class="recap-hero">
+      <p class="recap-big"><b>${r.opened}</b> article${r.opened === 1 ? '' : 's'} read</p>
+      <p>${change == null ? (r.opened ? 'Your first week with the recap.' : 'Open articles this week and your recap fills up.') : change >= 0 ? `▲ ${change}% more than the week before` : `▼ ${-change}% fewer than the week before`}${r.readN > r.opened ? ` · ${r.readN} marked read in all` : ''}</p>
+      <div class="bars" role="img" aria-label="Articles read each day: ${r.days.map((d) => `${d.label} ${d.n}`).join(', ')}">${r.days.map((d) => `<span class="bar"><span class="fill" style="height:${Math.round((d.n / max) * 100)}%"></span><span class="n">${d.n || ''}</span><span class="lbl">${esc(d.label)}</span></span>`).join('')}</div>
+    </div>
+    <div class="recap-grid">
+      <div class="recap-tile"><h3>Top feeds</h3>${r.feeds.length ? `<ol>${r.feeds.map(([t, n]) => `<li>${esc(t)} <span class="muted">${n}</span></li>`).join('')}</ol>` : '<p class="muted">Nothing yet</p>'}</div>
+      <div class="recap-tile"><h3>Top topics</h3>${r.topics.length ? `<ol>${r.topics.map(([i, n]) => `<li>${i.icon} ${esc(i.name)} <span class="muted">${n}</span></li>`).join('')}</ol>` : '<p class="muted">Nothing yet</p>'}</div>
+      <div class="recap-tile"><h3>This week</h3><ul class="plain">
+        <li>🔥 ${r.streak}-day streak</li>
+        ${r.langs.length ? `<li>🌐 ${r.langs.map(([i]) => esc(i.name)).join(', ')}</li>` : ''}
+        ${hourText ? `<li>🕐 You read most around ${esc(hourText)}</li>` : ''}
+        <li>⭐ ${r.stars} starred · 🖍 ${r.highlights} highlights · ⚡ ${r.swipes} swipes</li></ul></div>
+    </div>
+    <h2 class="home-h">🏅 Achievements <span class="muted">${earned} of ${BADGES.length}</span></h2>
+    <ul class="badges">${BADGES.map((b) => `<li class="${S.badges[b.id] ? 'on' : 'off'}" title="${esc(b.desc)}"><span class="b-ico" aria-hidden="true">${S.badges[b.id] ? b.icon : '🔒'}</span><span><b>${esc(b.name)}</b><span class="muted">${esc(b.desc)}${S.badges[b.id] ? ` · ${esc(new Date(S.badges[b.id]).toLocaleDateString(undefined, { dateStyle: 'medium' }))}` : ''}</span></span></li>`).join('')}</ul>
+  </section>`;
+}
+
+/** The recap as a picture: saved, or shared through the device's share sheet. */
+async function recapImage(shareIt) {
+  const r = recapData();
+  const canvas = document.createElement('canvas');
+  drawRecap(canvas, { range: r.range, opened: r.opened, days: r.days, topFeed: r.feeds[0]?.[0], topTopic: r.topics[0] ? `${r.topics[0][0].icon} ${r.topics[0][0].name}` : '', streak: r.streak, badges: BADGES.filter((b) => S.badges[b.id]).length });
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+  const name = `salareader-week-${today()}.png`;
+  const file = new File([blob], name, { type: 'image/png' });
+  if (shareIt && navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: 'My week in reading' }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  download(name, blob, 'image/png');
+}
+
+function recapLineHTML() {
+  const r = recapData();
+  const earned = BADGES.filter((b) => S.badges[b.id]).length;
+  return `<a class="recap-line" href="#/recap"><span aria-hidden="true">📊</span><span><b>Your week:</b> ${r.opened} article${r.opened === 1 ? '' : 's'} read · 🔥 ${r.streak} · 🏅 ${earned} of ${BADGES.length} achievements</span><span class="go" aria-hidden="true">→</span></a>`;
+}
+
 // ---------- fun ----------
 
 function celebrate() {
   toast('🎉 Inbox zero! You read everything.', 4000);
+  bump('zeros');
+  S.stats.zeroDays = [...new Set([...(S.stats.zeroDays || []), today()])].slice(-60);
+  checkBadges();
   const c = $('#confetti');
   const ctx = c.getContext('2d');
   c.width = innerWidth; c.height = innerHeight;
@@ -3117,7 +3814,7 @@ function exportOPML(onlyFolder) {
 
 // ---------- backup: move everything to another device ----------
 
-const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'investigations', 'collapsed', 'days', 'settings'];
+const BACKUP_KEYS = ['subs', 'read', 'starred', 'topics', 'investigations', 'collapsed', 'days', 'settings', 'mutes', 'highlights', 'taste', 'stats', 'badges', 'log'];
 const isPerFeedKey = (k) => k.startsWith('own:') || k.startsWith('vec:');
 
 async function buildBackup(includeKeys) {
@@ -3148,8 +3845,8 @@ async function importBackup(file) {
   }
   const d = backup?.data;
   const bad = backup?.app !== 'salareader' || !isObj(d)
-    || ('subs' in d && !Array.isArray(d.subs)) || ['read', 'starred', 'collapsed', 'settings', 'ownItems'].some((k) => k in d && !isObj(d[k]))
-    || ['topics', 'days', 'investigations'].some((k) => k in d && !Array.isArray(d[k]))
+    || ('subs' in d && !Array.isArray(d.subs)) || ['read', 'starred', 'collapsed', 'settings', 'ownItems', 'highlights', 'taste', 'stats', 'badges'].some((k) => k in d && !isObj(d[k]))
+    || ['topics', 'days', 'investigations', 'mutes', 'log'].some((k) => k in d && !Array.isArray(d[k]))
     || (d.subs || []).some((s) => !isObj(s) || typeof s.url !== 'string' || typeof s.id !== 'string');
   if (bad) throw new Error("That file isn't a Sala Reader backup, or it's damaged.");
   const n = d.subs?.length ?? 0;
@@ -3236,7 +3933,7 @@ function closeSidebar() { document.body.classList.remove('nav-open'); $('#scrim'
 
 /** Puts the saved values of these keys back into the app state (after another tab saved them). */
 function applyKeys(keys) {
-  const fields = { subs: 'subs', read: 'read', starred: 'starred', topics: 'topics', investigations: 'invs', collapsed: 'collapsed', days: 'days' };
+  const fields = { subs: 'subs', read: 'read', starred: 'starred', topics: 'topics', investigations: 'invs', collapsed: 'collapsed', days: 'days', mutes: 'mutes', highlights: 'highlights', taste: 'taste', stats: 'stats', badges: 'badges', log: 'log', kept: 'kept' };
   for (const k of keys) {
     if (fields[k]) S[fields[k]] = store.get(k, k === 'subs' ? null : Array.isArray(S[fields[k]]) ? [] : {});
     else if (k === 'settings') { S.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) }; applyTheme(); }
@@ -3300,6 +3997,10 @@ function wire() {
   });
 
   document.addEventListener('click', (e) => {
+    const sum = e.target.closest('details.story > summary');
+    if (sum && !sum.parentElement.open) { bump('stories'); checkBadges(); }
+    const storyLink = e.target.closest('[data-story-link]');
+    if (storyLink) { S.openStory = storyLink.dataset.storyLink; }
     const opener = e.target.closest('[data-open]');
     if (opener) {
       e.preventDefault();
@@ -3353,6 +4054,22 @@ function wire() {
         case 'markall': btn.closest('details')?.removeAttribute('open'); markAllRead(sourceItems()); return;
         case 'brief': brief(); return;
         case 'surprise': surprise(); closeSidebar(); return;
+        case 'triage': openTriage(); return;
+        case 'closebrief': closeBrief(); return;
+        case 'showmuted': S.view.showMuted = !S.view.showMuted; render(); return;
+        case 'tidyunsub': case 'tidykeep': case 'tidylater': tidyAction(act); return;
+        case 'hlnote': case 'hldel': highlightAction(act, btn); return;
+        case 'hlexport': exportHighlights(); return;
+        case 'recapsave': recapImage(false); return;
+        case 'recapshare': recapImage(true); return;
+        case 'mutes': openMute(); return;
+        case 'storyread': case 'storyinv': {
+          const st = stories().find((x) => x.id === btn.dataset.story);
+          if (!st) return;
+          if (act === 'storyread') { markAllRead(st.items); return; }
+          startInvestigation({ query: st.lead.t });
+          return;
+        }
         case 'refresh': refresh(); return;
         case 'copyaddr': { const f = S.feedById.get(S.view.id); if (f) navigator.clipboard?.writeText(f.url).then(() => toast('Address copied')).catch(() => {}); return; }
         case 'retry': {
@@ -3638,6 +4355,8 @@ function wire() {
   });
   $('#resetRead').addEventListener('click', () => { if (confirm('Mark every article as unread?')) { S.read = {}; store.set('read', S.read); S.unread = unreadOf(S.items); render(); } });
 
+  wireExtras();
+
   // Keyboard
   let gPending = false;
   document.addEventListener('keydown', (e) => {
@@ -3652,6 +4371,8 @@ function wire() {
       return;
     }
     if (e.key === 'Escape' && !$('#aaPop').hidden) { closeAa(); return; }
+    // Esc closes the ✨ Brief me box (unless a dialog or the search box has the key).
+    if (e.key === 'Escape' && !document.querySelector('dialog[open]') && e.target !== $('#q') && !el.closest('#invPanel') && closeBrief()) { e.preventDefault(); return; }
     if (S.invOpen && el.closest('#invPanel')) {
       if (e.key === 'Enter' && !e.shiftKey && el.id === 'invInput') { e.preventDefault(); $('#invForm').requestSubmit(); }
       else if (e.key === 'Escape') { e.preventDefault(); closeInvestigation(); }
@@ -3691,6 +4412,7 @@ function wire() {
       case 'A': if (e.shiftKey && S.view.type !== 'home') markAllRead(sourceItems()); break;
       case '/': e.preventDefault(); $('#q').focus(); $('#q').select(); break;
       case 'x': surprise(); break;
+      case 't': openTriage(); break;
       case 'r': refresh(); break;
       case 'u': toggleNav(); break;
       case '1': setMode('list'); break;
@@ -3714,6 +4436,43 @@ function wire() {
     }
     e.preventDefault();
   });
+}
+
+/** Highlights, notes, mutes and swipe rounds. */
+function wireExtras() {
+  // Select text in an article: 🖍 Highlight or 📝 Note.
+  let selTimer = 0;
+  document.addEventListener('selectionchange', () => { clearTimeout(selTimer); selTimer = setTimeout(updateHlBar, 120); });
+  addEventListener('scroll', () => { if (!$('#hlBar').hidden) updateHlBar(); }, { passive: true, capture: true });
+  $('#hlBar').addEventListener('mousedown', (e) => e.preventDefault()); // keep the selection
+  $('#hlBar').addEventListener('click', (e) => { const b = e.target.closest('[data-hl]'); if (b) saveHighlight(b.dataset.hl === 'note'); });
+  $('#noteForm').addEventListener('submit', (e) => {
+    if (e.submitter?.value !== 'save') return;
+    const done = noteDone;
+    noteDone = null;
+    done?.($('#noteText').value);
+  });
+  $('#noteDialog').addEventListener('close', () => { noteDone = null; });
+  // Muted subjects.
+  $('#muteForm').addEventListener('submit', (e) => {
+    if (e.submitter?.value === 'add' || !e.submitter) { e.preventDefault(); addMute($('#muteInput').value); }
+  });
+  $('#muteList').addEventListener('click', (e) => { const b = e.target.closest('[data-unmute]'); if (b) unmute(b.dataset.unmute); });
+  // Swipe rounds: buttons and keys.
+  const d = $('#triageDialog');
+  d.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-tri]');
+    if (!b) return;
+    if (b.dataset.tri === 'again') openTriage();
+    else if (b.dataset.tri === 'readkept') { d.close(); go('#/kept'); }
+    else triAct(b.dataset.tri);
+  });
+  d.addEventListener('keydown', (e) => {
+    if (!tri || tri.i >= tri.pool.length || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = { ArrowLeft: 'skip', h: 'skip', ArrowRight: 'keep', l: 'keep', ArrowUp: 'open', s: 'star' }[e.key];
+    if (k) { e.preventDefault(); triAct(k); }
+  });
+  d.addEventListener('close', () => { clearInterval(triTimer); renderSidebar(); if (S.view.type === 'home') refreshHome(); else if (S.view.type !== 'feed') renderHeaderCounts(); });
 }
 
 function setMode(mode) {
@@ -3749,7 +4508,9 @@ async function renderDirectory() {
   const all = dir.categories.flatMap((c) => c.feeds.map((f) => ({ ...f, cat: c.name })));
   const have = new Set(S.feeds.map((f) => f.url));
   // What you're into: your topic words and folder names.
-  const interests = [...S.topics.map((t) => t.query), ...allFolderNames()].join(' ').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2);
+  // …and what you open, star and keep (the For you words you like most).
+  const liked = Object.entries(S.taste.words || {}).filter(([, w]) => w >= 2).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([w]) => w);
+  const interests = [...new Set([...S.topics.map((t) => t.query), ...allFolderNames()].join(' ').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2).concat(liked))];
   const score = (f) => interests.filter((w) => `${f.title} ${f.tags} ${f.cat}`.toLowerCase().includes(w)).length;
   const q = ($('#dirFilter').value || '').trim().toLowerCase();
   const cats = ['For you', ...dir.categories.map((c) => c.name)];
@@ -4180,6 +4941,9 @@ function articleMenu(art) {
     if (idx < S.list.length - 1) items.push(idx > 0 ? null : '-', { label: `Mark the ${S.list.length - idx - 1} below as read`, run: () => markAllRead(S.list.slice(idx + 1)) });
   }
   if (link) items.push('-', { label: 'Open original in a new tab', key: 'v', run: () => window.open(link, '_blank', 'noopener,noreferrer') }, { label: 'Copy link', run: () => copyText(link, 'Link copied') });
+  items.push('-', { label: '👍 More like this in For you', run: () => { teach(it, 2); toast('🎯 For you will show more like this'); } },
+    { label: '👎 Less like this', run: () => { teach(it, -2); S.view.keep?.add(id); markRead(id); toast('🎯 For you will show less like this'); } },
+    { label: '🔇 Mute stories like this…', run: () => openMute(it.t) });
   items.push('-', { label: '🕵️ Dig deeper', run: () => digDeeper(it) });
   if (f && !(S.view.type === 'feed' && S.view.id === f.id)) items.push({ label: `Go to ${f.title}`, run: () => go(`#/feed/${f.id}`) });
   return items.filter(Boolean);
@@ -4276,6 +5040,12 @@ function cmdItems(q) {
     act('Brief me on this list', brief, '✨');
   }
   act('Surprise me', surprise, '🎲', 'x');
+  go_('For you', '#/foryou', '🎯', 'Go to');
+  act('Swipe round: sort your unread fast', openTriage, '⚡', 't');
+  go_('Developing stories', '#/stories', '🧵', 'Go to');
+  go_('Highlights and notes', '#/highlights', '🖍', 'Go to');
+  go_('Your week in reading (recap and achievements)', '#/recap', '📊', 'Go to');
+  act('Muted subjects…', () => openMute(), '🔇');
   act('Layout: list', () => setMode('list'), '☰', '1');
   act('Layout: expanded', () => setMode('expanded'), '▤', '2');
   act('Layout: reading pane', () => setMode('pane'), '◫', '3');

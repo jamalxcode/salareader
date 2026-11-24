@@ -133,6 +133,11 @@
       </label>
     </section>
     <section>
+      <h3>Muted subjects</h3>
+      <p class="hint">Hide articles about subjects you don't want to see, by meaning: muting “crypto prices” also hides “Bitcoin tumbles 8%”. Right-click an article for <b>Mute stories like this</b>.</p>
+      <div class="buttons left"><button type="button" data-act="mutes" class="ghost">🔇 Muted subjects…</button></div>
+    </section>
+    <section>
       <h3>AI search</h3>
       <p class="hint">Search and AI topics run a small AI model in your browser (about 25 MB, downloaded once). It's free and nothing you search leaves your device.</p>
       <label>Languages
@@ -248,6 +253,7 @@
       <dt><kbd>Shift</kbd>+<kbd>a</kbd></dt><dd>Mark all as read</dd>
       <dt><kbd>/</kbd></dt><dd>Search</dd>
       <dt><kbd>x</kbd></dt><dd>Surprise me</dd>
+      <dt><kbd>t</kbd></dt><dd>Swipe round: sort your unread fast (← skip, → keep, ↑ read)</dd>
       <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>List / expanded / reading pane</dd>
       <dt><kbd>Space</kbd></dt><dd>Reading pane: scroll the article, then the next one</dd>
       <dt><kbd>+</kbd> / <kbd>−</kbd></dt><dd>Bigger / smaller text</dd>
@@ -289,6 +295,40 @@
   </div>
 </dialog>
 
+<dialog id="muteDialog" class="sheet">
+  <form method="dialog" id="muteForm">
+    <h2>🔇 Muted subjects</h2>
+    <p class="hint">Articles about a muted subject are hidden from All items, folders, smart folders, topics, For you and Home, even when they use other words. Search and Starred still find them. It all happens on this device.</p>
+    <div class="mute-add"><label>Mute a subject<input id="muteInput" type="text" placeholder="e.g. celebrity gossip, crypto prices" autocomplete="off"></label><button value="add" class="primary">Mute</button></div>
+    <p id="muteStatus" class="status" aria-live="polite"></p>
+    <ul id="muteList" class="mute-list"></ul>
+    <div class="buttons"><button type="button" class="ghost" data-close>Done</button></div>
+  </form>
+</dialog>
+
+<dialog id="noteDialog" class="sheet">
+  <form method="dialog" id="noteForm">
+    <h2>📝 Note</h2>
+    <blockquote id="noteQuote" class="note-quote"></blockquote>
+    <label>Your note<textarea id="noteText" rows="4"></textarea></label>
+    <div class="buttons"><button type="button" class="ghost" data-close>Cancel</button><button value="save" class="primary">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="triageDialog" class="triage" aria-label="Swipe round">
+  <div class="tri-top"><span id="triProg" class="tri-prog"></span><span id="triTime" class="tri-time" aria-hidden="true"></span><button type="button" class="icon-btn" data-close aria-label="Close the swipe round">✕</button></div>
+  <div id="triStage" class="tri-stage"></div>
+  <div id="triBtns" class="tri-btns">
+    <button type="button" data-tri="skip" title="Skip: mark read, less like this (←)">← Skip</button>
+    <button type="button" data-tri="star" title="Star it (s)" aria-label="Star">★</button>
+    <button type="button" data-tri="open" title="Read it now (↑)">↑ Read</button>
+    <button type="button" data-tri="keep" class="primary" title="Keep for later, more like this (→)">Keep →</button>
+  </div>
+  <p class="tri-hint"><span class="by-keys">Swipe the card, or <kbd>←</kbd> skip · <kbd>→</kbd> keep · <kbd>↑</kbd> read now · <kbd>s</kbd> star</span><span class="by-touch">Swipe right to keep for later, left to skip</span></p>
+</dialog>
+
+<div id="hlBar" class="hl-bar" role="toolbar" aria-label="Highlight the selected text" hidden><button type="button" data-hl="mark">🖍 Highlight</button><button type="button" data-hl="note">📝 Note</button></div>
+<div id="badgeToast" class="badge-toast" role="status" aria-live="polite" hidden></div>
 <div id="pullIndicator" class="pull" hidden aria-hidden="true">⟳ Pull to refresh</div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <canvas id="confetti" class="confetti" aria-hidden="true"></canvas>

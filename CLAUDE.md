@@ -32,8 +32,9 @@ There is no lint script. `fetch.mjs` also honors `FEEDS_FILE`, `DATA_DIR`, `MODE
 - `ai.js`: the six AI assistants, Grok live search (`x_search`/`web_search`), embedding worker pool.
 - `embed-worker.js`: runs the MiniLM embedding model (transformers.js) in Web Workers (up to four).
 - `smart.js`: smart folders: language detection, topics, kinds.
+- `extras.js`: pure helpers for For you (learn/tasteScore), developing stories (clusterStories), achievements (BADGES) and the recap picture; app.js wires them (stores `taste`, `mutes`, `highlights`, `log`, `kept`, `stats`, `badges`, all in backups except `kept`).
 - `style.css`: layout and themes (Light, Dark, Paper, Classic 2008), colour tokens (WCAG AA required).
-- `sw.js`: service worker, same-origin files only, network-first with cached fallback; cache name `salareader-v2`, `SHELL` lists the app files.
+- `sw.js`: service worker, same-origin files only, network-first with cached fallback; cache name `salareader-v3`, `SHELL` lists the app files.
 - `manifest.webmanifest`, `icon*.png`, `icon.svg`: PWA install.
 - `feeds.json`: the shared catalog (everyone starts subscribed). `directory.json`: hand-picked Discover feeds.
 - `scripts/fetch.mjs`: scheduled catalog fetch: merges with the previous run, applies dead-or-alive rules, keeps 60 days / 150 items per feed, computes vectors, writes `data/index.json`, `data/content.json`, `data/vectors.json`, `data/vectors-multi.json`, `data/seen.json`, and a health report to the Actions step summary. Exports `failKind`, `judge`, `DEAD_AFTER` for tests.

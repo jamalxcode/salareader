@@ -341,5 +341,21 @@
       "while refreshing, disabled: true",
       "feed read again: true \\| label after: ⟳ Refresh"
     ]
+  },
+  "t46.cjs": {
+    "name": "For you, swipe rounds, highlights, mutes, recap, achievements; Esc closes Brief me",
+    "expect": [
+      "for you learned: 3 \\| 17 picked for you · learned from 3 things you did",
+      "highlight mark: .+\\|Check this later",
+      "highlights page: 1 📝 Check this later",
+      "markdown export: salareader-highlights-.*\\.md",
+      "mute hides: true \\| quantum shown: 0 \\| true",
+      "show muted: true",
+      "round done: Round done! \\| kept \\d+ of \\d+",
+      "kept list: #/kept [1-9]",
+      "recap: 3 articles read \\| badges earned: First page.*Curator",
+      "recap image: salareader-week-.*\\.png",
+      "brief closed by Esc: true"
+    ]
   }
 }
