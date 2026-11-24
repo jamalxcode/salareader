@@ -336,7 +336,7 @@ dialog label.button { display: inline-flex; margin: 0; font-weight: 400; }
   .logo-text { display: none; }
   .search { height: 40px; padding: 0 12px; min-width: 0; }
   .top-actions { gap: 0; flex: none; }
-  #surpriseBtn, #refreshBtn { display: none; }
+  #surpriseBtn { display: none; }
   .search-spark { display: none; }
   .icon-btn { width: 36px; height: 36px; }
   .streak { padding: 0 2px; }
